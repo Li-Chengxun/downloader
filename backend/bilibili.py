@@ -94,6 +94,37 @@ _API = "https://api.bilibili.com"
 _VIEW_API = f"{_API}/x/web-interface/view"
 _PLAYURL_API = f"{_API}/x/player/playurl"
 
+# ---------------------------------------------------------------- 番剧（PGC）接口
+#
+# 番剧/影视走的是**另一套接口**，与普通投稿（UGC）有几处关键差异，改代码前务必留意：
+#
+# 1. 数据放在**顶层 ``result``**，不是 ``data``。照抄 UGC 的 ``body["data"]`` 会拿到
+#    None，表现成「接口报成功却什么都没解析出来」。
+# 2. 入口编号有三种：``ep``（单集）/ ``ss``（季）/ ``md``（番剧媒体）。
+#    ``pgc/view/web/season`` 只认 ``ep_id`` / ``season_id``；
+#    给它传 ``media_id`` 会直接 -404。``md`` 必须先过 ``pgc/view/web/media``
+#    换成 ``season_id`` 再查。
+# 3. ``playurl`` 换成了 ``pgc/player/web/playurl``，参数是 ``ep_id`` 而不是 ``bvid``。
+# 4. 会员集的失败方式是**静默的**：``code`` 仍是 0，但只给一段 3 分钟试看片段
+#    （``is_preview=1``）。不专门识别就会把试看片段当成正片给用户下，见
+#    ``_is_preview_payload``。
+_PGC_SEASON_API = f"{_API}/pgc/view/web/season"
+_PGC_MEDIA_API = f"{_API}/pgc/view/web/media"
+_PGC_PLAYURL_API = f"{_API}/pgc/player/web/playurl"
+
+#: 番剧专属错误码文案（``_VIEW_ERRORS`` 只覆盖 UGC）
+_PGC_ERRORS = {
+    -404: "番剧不存在或已下架，请确认链接是否正确",
+    -403: "该番剧在当前网络环境下不可观看（可能受地区限制）",
+    10403: "该番剧在当前网络环境下不可观看（受地区限制，需要对应地区的网络）",
+    10002: "该番剧暂时无法访问，请稍后重试",
+}
+
+#: 单集 ``status`` 的含义。实测：2 = 免费可看，13 = 付费（大会员）专享。
+#: 用集合白名单而不是 ``!= 2``——将来接口新增「限免」「付费」等状态时，
+#: 未知状态会被归为「不确定」，由 playurl 实测兜底，不会误判成可下。
+_PGC_EP_FREE = 2
+
 # ---------------------------------------------------------------- 风控相关配置
 
 #: 站点首页：设备指纹（buvid3 / b_nut）由这里下发，也是默认 Referer
@@ -123,6 +154,22 @@ _AV_RE = re.compile(r"(?:^|[^\w])av(\d{1,12})(?:[^\d]|$)", re.I)
 _B23_RE = re.compile(r"b23\.tv/([0-9A-Za-z]+)", re.I)
 # 分P：?p=2
 _PAGE_RE = re.compile(r"[?&]p=(\d{1,4})")
+
+# 番剧播放页路径：/bangumi/play/ep741735、/bangumi/media/md20144639。
+# 这是**最可靠**的番剧识别方式——路径是 B 站自己生成的，不会误判。
+_BANGUMI_PATH_RE = re.compile(r"/bangumi/(?:play|media)/(ep|ss|md)(\d{1,9})", re.I)
+
+# 裸番剧编号：**整个输入**就是一个编号（允许 # 前缀和周围的空白），如 ``ep741735``。
+#
+# 这里刻意用「整串匹配」而不是「在文本里找」——宽松匹配有真实的误判风险：
+# 抖音文案里出现 ``md5`` 就会被 ``md(\d+)`` 命中，于是被当成番剧送去 B 站解析。
+# 用户从 App 复制番剧链接时一定是完整 URL（走上面的路径规则），裸编号只可能是手输，
+# 格式必然干净，所以收紧匹配不会漏掉正常输入。
+_BANGUMI_BARE_RE = re.compile(r"^[#\s]*(ep|ss|md)[\s\-_]*(\d{1,9})\s*$", re.I)
+
+# 弱提示用：文本里**看起来**像番剧编号。仅用于在普通视频解析失败时给一句更贴切的提示，
+# 绝不参与路由判断（那就等于把上面的误判风险又请回来了）。
+_BANGUMI_HINT_RE = re.compile(r"(?:^|[^\w])(ep|ss|md)\d{1,9}(?:[^\d]|$)", re.I)
 
 # 从分享文本里抽链接（B 站分享格式：【标题-哔哩哔哩】 https://b23.tv/xxxxx）
 _URL_IN_TEXT_RE = re.compile(r"https?://[^\s\u4e00-\u9fff\uff00-\uffef]+", re.I)
@@ -201,6 +248,23 @@ class ParseError(Exception):
     """业务解析错误，message 会直接展示给用户。"""
 
 
+class ContentLocked(ParseError):
+    """内容受会员 / 地区限制，拿不到完整视频流。
+
+    单独成一个异常类型，是因为它**不算解析失败**：标题、封面、剧集列表这些
+    元信息都是好的，只是当前账号下不到完整片子。调用方（``parse_bangumi``）会把它
+    转成「卡片正常展示 + 明确告知为什么不能下」，而不是弹一个错误框把结果全部丢掉。
+
+    这正是本项目的核心原则——**只列真实可下的档位，不做欺骗性展示**：
+    会员集在未登录时会返回 ``code=0`` 外加一段 3 分钟试看片段，如果不识别，
+    用户就会下到一个「以为是正片、其实是试看」的文件。
+    """
+
+    def __init__(self, message: str, reason: str = "vip"):
+        super().__init__(message)
+        self.reason = reason          # vip / area / unknown
+
+
 # ---------------------------------------------------------------- 链接工具
 
 def _host_of(url: str) -> str:
@@ -246,17 +310,70 @@ def is_bilibili_short_link(url: str) -> bool:
     return _host_of(url).endswith("b23.tv")
 
 
-def is_bilibili_id(text: str) -> bool:
-    """输入里是否含 B 站视频号（裸 BV 号 / av 号）。
+def extract_bangumi_ref(text: str) -> Optional[tuple]:
+    """从输入里提取番剧标识，返回 ``("ep", 741735)`` / ``("ss", 44904)`` / ``("md", 20144639)``。
 
-    用户常直接粘贴 ``BV1GJ411x7h7`` 这类纯视频号（前端 placeholder 也这么写），
+    识别分两级，**由强到弱**：
+
+    1. ``/bangumi/play/ep123`` 这类路径 —— 路径是 B 站自己生成的，绝不会误判；
+    2. 裸编号 ``ep123`` / ``ss123`` / ``md123`` —— **整个输入**就得是编号本身。
+
+    第 2 条刻意不放松（不去「在文本里搜」）：宽松匹配会让抖音文案里的 ``md5``
+    被 ``md(\\d+)`` 命中而误判成番剧。用户从 App 分享出来的番剧一定是完整 URL，
+    走第 1 条就够了；裸编号只可能是手输，格式必然干净。
+
+    识别不出返回 ``None``。
+    """
+    t = (text or "").strip()
+    if not t:
+        return None
+
+    m = _BANGUMI_PATH_RE.search(t)
+    if m:
+        return m.group(1).lower(), int(m.group(2))
+
+    # 有 BV / av 号就说明这是普通投稿，不再往下猜
+    if _BV_RE.search(t) or _AV_RE.search(t):
+        return None
+
+    m = _BANGUMI_BARE_RE.match(t)
+    if m:
+        return m.group(1).lower(), int(m.group(2))
+    return None
+
+
+def is_bangumi_input(text: str) -> bool:
+    """输入是否指向番剧（PGC）而不是普通投稿（UGC）。"""
+    return extract_bangumi_ref(text) is not None
+
+
+def bangumi_referer(ep_id: Optional[int] = None,
+                    season_id: Optional[int] = None) -> str:
+    """番剧接口的 Referer。
+
+    风控会核对 Referer 与实际请求的资源是否对得上：拿单集就带单集页，
+    拿整季就带季页。统一塞 https://www.bilibili.com/ 也能过，但更像脚本。
+    """
+    if ep_id:
+        return f"https://www.bilibili.com/bangumi/play/ep{ep_id}"
+    if season_id:
+        return f"https://www.bilibili.com/bangumi/play/ss{season_id}"
+    return _HOME_URL
+
+
+def is_bilibili_id(text: str) -> bool:
+    """输入里是否含 B 站编号（BV 号 / av 号 / 番剧 ep·ss·md 号）。
+
+    用户常直接粘贴 ``BV1GJ411x7h7`` 这类纯编号（前端 placeholder 也这么写），
     这种输入没有域名，靠 ``is_bilibili_link`` 识别不出来，需要单独判断。
-    BV 号形如 ``BV`` + 10 位字母数字，特征足够明显，误判风险很低。
+
+    番剧编号（``ep741735`` 等）一并纳入：平台判定（``_detect_platform``）与前端
+    实时提示都靠这个函数，漏掉它就会把裸番剧号当成抖音链接送去抖音解析。
     """
     t = (text or "").strip()
     if not t:
         return False
-    return bool(_BV_RE.search(t) or _AV_RE.search(t))
+    return bool(_BV_RE.search(t) or _AV_RE.search(t) or extract_bangumi_ref(t))
 
 
 def extract_share_url(text: str) -> str:
@@ -673,6 +790,56 @@ async def _playurl(bvid: str, cid: int, qn: int, cookie: str = "") -> Optional[D
     return data
 
 
+async def _playurl_pgc(ep_id: int, cid: int, qn: int,
+                       cookie: str = "") -> Optional[Dict[str, Any]]:
+    """番剧版的 ``_playurl``：走 ``pgc/player/web/playurl``，取 ``result`` 节点。
+
+    番剧接口把数据放在顶层 ``result``（UGC 是 ``data``），这是两套接口最容易踩的差异。
+    """
+    body = await _api_get(
+        _PGC_PLAYURL_API,
+        {"ep_id": ep_id, "cid": cid, "qn": qn, "fnval": 1, "fnver": 0, "fourk": 1},
+        cookie,
+        referer=bangumi_referer(ep_id=ep_id),
+    )
+    if int(body.get("code") or 0) != 0:
+        return None
+    data = body.get("result")
+    if not isinstance(data, dict):
+        return None
+    durl = data.get("durl") or []
+    if len(durl) != 1 or not durl[0].get("url"):
+        return None
+    return data
+
+
+def _is_preview_payload(data: Dict[str, Any], official_ms: int = 0) -> bool:
+    """判断这份 playurl 返回的是不是**试看片段**。
+
+    番剧会员集在未登录（或非大会员）时的表现极其隐蔽：``code`` 依然是 0，
+    HTTP 也是 200，但 ``durl`` 指向的其实是一段约 3 分钟的试看。实测数据：
+
+        免费集  is_preview=0  官方时长 546s  返回 545621ms  ← 完整
+        会员集  is_preview=1  官方时长 545s  返回 180137ms  ← 只有 3 分钟
+
+    所以判定用**两条独立证据**，任一成立即认定是试看：
+
+    1. ``is_preview == 1``（接口自己承认）—— 最直接；
+    2. 返回时长明显短于官方标称时长（短于 90%）—— 兜底，防止接口哪天不填
+       ``is_preview`` 了。
+
+    第 2 条用 90% 而不是「小于」：编码封装会让时长有零点几秒的偏差（545621 vs 546000
+    就是这种情况），卡死在相等会误判正常视频。
+    """
+    if int(data.get("is_preview") or 0) == 1:
+        return True
+    if official_ms > 0:
+        got_ms = int(((data.get("durl") or [{}])[0]).get("length") or 0)
+        if got_ms and got_ms < official_ms * 0.9:
+            return True
+    return False
+
+
 def _quality_label(qn: int, payload: Optional[Dict[str, Any]] = None) -> tuple:
     """返回 ``(短标签, 补充描述)``，优先用接口自己的描述文案。"""
     if payload:
@@ -692,7 +859,7 @@ def _quality_label(qn: int, payload: Optional[Dict[str, Any]] = None) -> tuple:
     return f"{qn}P", ""
 
 
-async def _collect_qualities(bvid: str, cid: int, cookie: str = "") -> List[Dict[str, Any]]:
+async def _collect_qualities_via(fetch, official_ms: int = 0) -> List[Dict[str, Any]]:
     """逐档请求，只保留接口**真实返回**的清晰度，从高到低排序。
 
     这样用户看到几档就一定能下到几档，不会出现「点了 1080P 实际给 720P」。
@@ -707,15 +874,28 @@ async def _collect_qualities(bvid: str, cid: int, cookie: str = "") -> List[Dict
 
     未登录用户的实际请求数因此从 7 次降到 3 次（120→64、32、16），
     既省时间也显著降低了 412 概率。
+
+    :param fetch: ``(qn) -> awaitable[payload|None]``。普通视频传 ``_playurl`` 的闭包，
+        番剧传 ``_playurl_pgc`` 的闭包——逐档试探的算法完全一样，只有接口不同。
+    :param official_ms: 该集官方标称时长（毫秒）。仅番剧需要，用来识别试看片段。
+    :raises ContentLocked: 首探拿到的就是试看片段（会员集未登录时的典型表现）。
     """
     tiers: Dict[int, Dict[str, Any]] = {}
     asked: set = set()                      # 已经发过请求的档位，避免重复问
 
     first_qn = _QN_CANDIDATES[0]
-    first = await _playurl(bvid, cid, first_qn, cookie)
+    first = await fetch(first_qn)
     if first is None:
         raise ParseError(
             "该视频未提供可直接下载的完整视频流，可能是付费内容、会员专属或受版权保护"
+        )
+    # 首探就发现是试看片段 → 后面所有档位都只会返回同一段试看，不必再问。
+    # 更重要的是：这里必须**中断**，否则会把试看片段当成正片列给用户下载。
+    if _is_preview_payload(first, official_ms):
+        raise ContentLocked(
+            "本集为大会员专享，当前账号只能获取试看片段，因此不提供下载。"
+            "登录大会员账号后可下载完整正片。",
+            reason="vip",
         )
     asked.add(first_qn)
     q0 = int(first.get("quality") or 0)
@@ -752,7 +932,7 @@ async def _collect_qualities(bvid: str, cid: int, cookie: str = "") -> List[Dict
             continue
         calls += 1
         asked.add(qn)
-        payload = await _playurl(bvid, cid, qn, cookie)
+        payload = await fetch(qn)
         if payload is None:                 # 这一档彻底不可用，继续看下一档
             i += 1
             continue
@@ -789,6 +969,22 @@ async def _collect_qualities(bvid: str, cid: int, cookie: str = "") -> List[Dict
     if qualities:
         qualities[0]["best"] = True
     return qualities
+
+
+async def _collect_qualities(bvid: str, cid: int, cookie: str = "") -> List[Dict[str, Any]]:
+    """普通投稿（UGC）的 MP4 画质列表。"""
+    return await _collect_qualities_via(lambda qn: _playurl(bvid, cid, qn, cookie))
+
+
+async def _collect_qualities_pgc(ep_id: int, cid: int, cookie: str = "",
+                                 official_ms: int = 0) -> List[Dict[str, Any]]:
+    """番剧（PGC）的 MP4 画质列表。
+
+    比 UGC 多传一个 ``official_ms``，用来识别会员集的试看片段（见 ``_is_preview_payload``）。
+    """
+    return await _collect_qualities_via(
+        lambda qn: _playurl_pgc(ep_id, cid, qn, cookie), official_ms=official_ms
+    )
 
 
 def merge_formats(mp4: List[Dict[str, Any]],
@@ -953,22 +1149,39 @@ async def fetch_dash(bvid: str, cid: int, cookie: str = "") -> Optional[Dict[str
     return data if isinstance(data.get("dash"), dict) else None
 
 
-async def collect_dash_qualities(bvid: str, cid: int, cookie: str = "",
-                                 duration: int = 0) -> List[Dict[str, Any]]:
-    """列出 DASH 可用的清晰度（每条流一个档位）。
+async def fetch_dash_pgc(ep_id: int, cid: int, cookie: str = "") -> Optional[Dict[str, Any]]:
+    """番剧版的 ``fetch_dash``：走 ``pgc/player/web/playurl``，取顶层 ``result``。
 
-    DASH 的好处是**一次请求就能拿到全部可用档位**，不像 MP4 那样需要逐档试探，
-    所以这里只发一次 playurl 请求。
+    :raises ContentLocked: 返回的是试看片段。会员集的试看**没有 DASH 流**
+        （实测 ``is_preview=1`` 时 ``dash.video`` 为空、只有 ``durl``）。
+        这里主动抛出而不是返回 ``None``，是为了让报错说人话——若返回 ``None``，
+        调用方只会给出含糊的「该视频可能不支持高清档位」，用户完全看不懂
+        为什么大会员专享的片子在 DASH 档位上失效。
+    """
+    body = await _api_get(_PGC_PLAYURL_API, {
+        "ep_id": ep_id, "cid": cid, "qn": _QN_CANDIDATES[0],
+        "fnval": _DASH_FNVAL, "fnver": 0, "fourk": 1,
+    }, cookie, referer=bangumi_referer(ep_id=ep_id))
+    if int(body.get("code") or 0) != 0:
+        return None
+    data = body.get("result")
+    if not isinstance(data, dict):
+        return None
+    if int(data.get("is_preview") or 0) == 1:
+        raise ContentLocked(
+            "本集为大会员专享，当前账号只能获取试看片段，因此不提供下载。"
+            "登录大会员账号后可下载完整正片。",
+            reason="vip",
+        )
+    return data if isinstance(data.get("dash"), dict) else None
+
+
+def _dash_quality_list(data: Dict[str, Any], duration: int) -> List[Dict[str, Any]]:
+    """把一份 DASH 播放信息整理成前端要用的档位列表。
 
     体积是**估算**的：用 ``bandwidth``（bit/s）× 时长 ÷ 8。DASH 不返回整段大小，
     但估算值足够帮用户判断该下哪个档位。分辨率则是真实值（比 MP4 更准）。
     """
-    if not dash_supported():
-        return []                                    # 没 ffmpeg 就别列，免得点了必失败
-
-    data = await fetch_dash(bvid, cid, cookie)
-    if not data:
-        return []
     dash = data.get("dash") or {}
     audio = _pick_audio(dash)
     audio_bw = int((audio or {}).get("bandwidth") or 0)
@@ -1005,6 +1218,42 @@ async def collect_dash_qualities(bvid: str, cid: int, cookie: str = "",
         })
     out.sort(key=lambda q: q["qn"], reverse=True)
     return out
+
+
+async def collect_dash_qualities(bvid: str, cid: int, cookie: str = "",
+                                 duration: int = 0) -> List[Dict[str, Any]]:
+    """列出普通投稿（UGC）的 DASH 可用清晰度（每条流一个档位）。
+
+    DASH 的好处是**一次请求就能拿到全部可用档位**，不像 MP4 那样需要逐档试探，
+    所以这里只发一次 playurl 请求。
+    """
+    if not dash_supported():
+        return []                                    # 没 ffmpeg 就别列，免得点了必失败
+
+    data = await fetch_dash(bvid, cid, cookie)
+    if not data:
+        return []
+    return _dash_quality_list(data, duration)
+
+
+async def collect_dash_qualities_pgc(ep_id: int, cid: int, cookie: str = "",
+                                     duration: int = 0) -> List[Dict[str, Any]]:
+    """列出番剧（PGC）的 DASH 可用清晰度。``duration`` 单位是**秒**。
+
+    试看片段没有 DASH 流，``fetch_dash_pgc`` 会抛 ``ContentLocked``。
+    这里安静地当作「没有 DASH 档位」处理——因为 MP4 那一步早就抛过同一个异常了，
+    ``parse_bangumi`` 也已经据此把整集标记为不可下载，再抛一次没有意义。
+    """
+    if not dash_supported():
+        return []
+
+    try:
+        data = await fetch_dash_pgc(ep_id, cid, cookie)
+    except ContentLocked:
+        return []
+    if not data:
+        return []
+    return _dash_quality_list(data, duration)
 
 
 async def _download_stream(urls: List[str], dest: Path, cookie: str = "") -> None:
@@ -1059,8 +1308,8 @@ async def _run_ffmpeg(ff: str, vpath: Path, apath: Path, out: Path) -> None:
         raise ParseError("音视频合并失败" + (f"：{detail[-1][:200]}" if detail else ""))
 
 
-async def build_dash_file(bvid: str, cid: int, qn: int = 0, codecid: int = 0,
-                          cookie: str = "") -> Path:
+async def build_dash_file(bvid: str = "", cid: int = 0, qn: int = 0, codecid: int = 0,
+                          cookie: str = "", ep_id: int = 0) -> Path:
     """下载 DASH 音视频并合并成一个完整 MP4，返回临时文件路径。
 
     **调用方负责清理**（用 ``cleanup_dir(path.parent)``）——合并产物动辄上百 MB，
@@ -1068,12 +1317,15 @@ async def build_dash_file(bvid: str, cid: int, qn: int = 0, codecid: int = 0,
 
     :param qn: 目标清晰度。0 表示取可用最高档。
     :param codecid: 目标编码。0 表示按兼容性自动挑（优先 H.264）。
+    :param ep_id: 番剧单集号。传了就走番剧接口，忽略 ``bvid``——普通视频用 ``bvid``，
+        番剧用 ``ep_id``，两者只会有一个非 0。
     """
     ff = ffmpeg_path()
     if not ff:
         raise ParseError("服务器未安装 ffmpeg，无法合并 DASH 音视频流，请改用 MP4 档位")
 
-    data = await fetch_dash(bvid, cid, cookie)
+    data = (await fetch_dash_pgc(ep_id, cid, cookie) if ep_id
+            else await fetch_dash(bvid, cid, cookie))
     if not data:
         raise ParseError("未获取到 DASH 播放信息，该视频可能不支持高清档位")
     dash = data.get("dash") or {}
@@ -1114,8 +1366,177 @@ def cleanup_dir(d: Path) -> None:
 
 # ---------------------------------------------------------------- 诊断
 
+async def _fingerprint_report() -> Dict[str, Any]:
+    """回报设备指纹的状态（只给键名，不给明文）。
+
+    排查 412 时第一件要确认的就是「指纹到底拿到没有」，所以 UGC 与番剧的诊断共用它。
+    """
+    fp = await fingerprint()
+    keys = [kv.split("=", 1)[0].strip() for kv in fp.split(";") if "=" in kv]
+    return {
+        "keys": keys,
+        "has_buvid3": "buvid3" in keys,
+        "has_buvid4": "buvid4" in keys,
+        "has_b_nut": "b_nut" in keys,
+        "cached_at": int(_fp_at),
+        "ttl": int(_FP_TTL),
+    }
+
+
+def _cookie_source(session_cookie: str) -> str:
+    """人话描述本次解析用的是哪套凭据。"""
+    if session_cookie:
+        return "session(访客扫码)"
+    return "env(BILI_COOKIE)" if BILI_COOKIE else "none(未登录)"
+
+
+async def debug_bangumi(raw: str, ep: Optional[int] = None,
+                        cookie: str = "") -> Dict[str, Any]:
+    """番剧版的画质诊断：逐档回报 playurl 的原始结果，并点明「是不是试看片段」。
+
+    番剧最常见的困惑是「解析成功但只有 360P」和「下到的好像只有三分钟」，
+    这两个问题的答案都藏在 ``is_preview`` 与 ``durl.length`` 里（官方时长在
+    ``episode.duration``），所以诊断表把它们并排列出来对照。
+    """
+    def sj(r) -> Dict[str, Any]:
+        try:
+            return r.json()
+        except ValueError:
+            return {}
+
+    text = (raw or "").strip()
+    url = extract_share_url(text) or text
+    if is_bilibili_link(url) and is_bilibili_short_link(url):
+        url = await _resolve_short(_ensure_client(), url)
+    ref = extract_bangumi_ref(url) or extract_bangumi_ref(text)
+    if not ref:
+        raise ParseError("无法识别番剧编号")
+
+    kind, num = ref
+    if kind == "ep":
+        res = await _fetch_season(ep_id=num, cookie=cookie)
+    elif kind == "ss":
+        res = await _fetch_season(season_id=num, cookie=cookie)
+    else:
+        media = await _fetch_media(num, cookie=cookie)
+        res = await _fetch_season(season_id=int(media["season_id"]), cookie=cookie)
+
+    listing: List[Dict[str, Any]] = []
+    for i, e in enumerate(res.get("episodes") or [], 1):
+        listing.append(_bg_episode_item(e, i))
+    for grp in (res.get("section") or []):
+        for i, e in enumerate(grp.get("episodes") or [], 1):
+            listing.append(_bg_episode_item(e, i, section=(grp.get("title") or "花絮")))
+
+    want_ep = ep or (num if kind == "ep" else 0)
+    cur = next((x for x in listing if x["ep_id"] == want_ep), None) or (listing[0] if listing else {})
+    official_ms = int(cur.get("duration_ms") or 0)
+
+    session_cookie = (cookie or "").strip()
+    out: Dict[str, Any] = {
+        "kind": "bangumi",
+        "season_id": int(res.get("season_id") or 0),
+        "media_id": int(res.get("media_id") or 0),
+        "title": (res.get("season_title") or res.get("title") or "")[:60],
+        "ep_id": cur.get("ep_id"),
+        "cid": cur.get("cid"),
+        "episode_title": cur.get("part"),
+        "official_duration_sec": official_ms // 1000,
+        "episode_total": len(listing),
+        "episode_locked": sum(1 for x in listing if x.get("locked")),
+        "cookie_source": _cookie_source(session_cookie),
+        "cookie_len": len(resolve_cookie(cookie)),
+        "fingerprint": await _fingerprint_report(),
+        "nav": await fetch_nav(cookie),
+        "mp4_probe": [],
+    }
+
+    # 1) 逐档问 MP4，并把「时长是否缩水」摆出来——试看片段的体积和时长都会明显偏小
+    for qn in _QN_CANDIDATES:
+        try:
+            body = await _api_get(_PGC_PLAYURL_API, {
+                "ep_id": cur.get("ep_id"), "cid": cur.get("cid"), "qn": qn,
+                "fnval": 1, "fnver": 0, "fourk": 1,
+            }, cookie, referer=bangumi_referer(ep_id=cur.get("ep_id")))
+        except ParseError as e:
+            out["mp4_probe"].append({"ask": qn, "error": str(e)})
+            continue
+        data = body.get("result") if isinstance(body.get("result"), dict) else {}
+        durl = data.get("durl") or []
+        got_ms = int((durl[0].get("length") if durl else 0) or 0)
+        row = {
+            "ask": qn,
+            "code": body.get("code"),
+            "quality_got": data.get("quality"),
+            "accept_quality": data.get("accept_quality"),
+            "durl_segments": len(durl),
+            "size_bytes": (durl[0].get("size") if durl else None),
+            "is_preview": data.get("is_preview"),
+            "returned_sec": got_ms // 1000,
+            "truncated": bool(got_ms and official_ms and got_ms < official_ms * 0.9),
+        }
+        out["mp4_probe"].append(row)
+
+    # 2) DASH：一次列全部可用档位
+    try:
+        body = await _api_get(_PGC_PLAYURL_API, {
+            "ep_id": cur.get("ep_id"), "cid": cur.get("cid"), "qn": 127,
+            "fnval": _DASH_FNVAL, "fnver": 0, "fourk": 1,
+        }, cookie, referer=bangumi_referer(ep_id=cur.get("ep_id")))
+        data = body.get("result") if isinstance(body.get("result"), dict) else {}
+        dash = data.get("dash") or {}
+        got = sorted({int(v.get("id")) for v in (dash.get("video") or []) if v.get("id")},
+                     reverse=True)
+        out["dash"] = {
+            "code": body.get("code"),
+            "is_preview": data.get("is_preview"),
+            "accept_quality": data.get("accept_quality"),
+            "video_qualities": got,
+            "video_quality_names": [_quality_label(q)[0] for q in got],
+            "has_audio": bool(dash.get("audio")),
+        }
+    except ParseError as e:
+        out["dash"] = {"error": str(e)}
+
+    # 3) 人话结论——番剧的判断顺序和 UGC 不同：**先看是不是试看**，
+    #    因为试看是「有档位但内容残缺」，比「档位低」严重得多，也最容易被用户误当成正片。
+    preview_rows = [p for p in out["mp4_probe"] if p.get("is_preview") == 1 or p.get("truncated")]
+    mp4_ok = [p for p in out["mp4_probe"]
+              if p.get("quality_got") and not (p.get("is_preview") == 1 or p.get("truncated"))]
+    mp4_max = max([p.get("quality_got") or 0 for p in mp4_ok] or [0])
+    dash = out.get("dash") or {}
+    dash_meta_max = max(dash.get("accept_quality") or [0])
+    label = lambda q: _quality_label(q)[0] if q else "—"   # noqa: E731
+    nav = out["nav"]
+    logged_in = bool(nav.get("is_login"))
+    is_vip = bool(nav.get("vip"))
+
+    if preview_rows and mp4_max == 0:
+        out["verdict"] = (
+            "**当前账号只能获取试看片段**（时长明显短于官方标称时长），因此本集不提供下载。"
+            + ("该账号未登录，" if not logged_in else "")
+            + "本集属于大会员专享内容，需要登录大会员账号才能下载完整正片。"
+        )
+    elif not mp4_max:
+        out["verdict"] = "本集没有拿到任何可下载的完整流，可能是会员专享或受地区限制。"
+    elif not logged_in:
+        out["verdict"] = (
+            f"当前未登录，最高只能下 {label(mp4_max)}。"
+            "番剧的会员集在未登录时只能拿到试看片段，登录大会员后可下载完整正片。"
+        )
+    elif not is_vip:
+        out["verdict"] = (
+            f"凭据已生效（{nav.get('name')}，非大会员），最高只能下 {label(mp4_max)}。"
+            "1080P 及以上需大会员。"
+            + (f" 该集最高有 {label(dash_meta_max)}，开通大会员后即可解锁。" if dash_meta_max > mp4_max else "")
+        )
+    else:
+        out["verdict"] = f"一切正常，凭据已生效（大会员），最高可下 {label(mp4_max)}"
+    return out
+
+
 async def debug_qualities(raw: str, page: Optional[int] = None,
-                          cookie: str = "") -> Dict[str, Any]:
+                          cookie: str = "", ep: Optional[int] = None) -> Dict[str, Any]:
     """诊断「登录了但还是只有 720P」这类问题。
 
     逐档探测并原样回报接口的返回，同时用 DASH（fnval=4048）问一次
@@ -1125,6 +1546,9 @@ async def debug_qualities(raw: str, page: Optional[int] = None,
     * 视频本身就只到 720P（DASH 最高也只有 64）
     * 凭据没生效（DASH 最高 64 且 nav 显示未登录）
     * 凭据生效但没有更高权益（DASH 有 80/112，MP4 拿不到）
+
+    番剧链接会自动转给 ``debug_bangumi`` —— 番剧的编号体系（ep/ss/md）和
+    普通视频（BV/av）完全不同，硬套 UGC 的诊断会卡在「无法识别视频编号」。
 
     返回值里**不含凭据明文**，可以安全贴出来。
     """
@@ -1143,6 +1567,9 @@ async def debug_qualities(raw: str, page: Optional[int] = None,
         if is_bilibili_link(url) and is_bilibili_short_link(url):
             url = await _resolve_short(client, url)
 
+    if is_bangumi_input(url) or is_bangumi_input(text):
+        return await debug_bangumi(url, ep=ep, cookie=cookie)
+
     bvid = extract_bvid(url) or extract_bvid(text)
     aid = None if bvid else (extract_av_id(url) or extract_av_id(text))
     if not bvid and not aid:
@@ -1157,25 +1584,16 @@ async def debug_qualities(raw: str, page: Optional[int] = None,
     cid = int(cur.get("cid") or meta.get("cid") or 0)
 
     session_cookie = (cookie or "").strip()
-    # 把设备指纹的状态也报出来：排查 412 时，第一件要确认的就是「指纹到底拿到没有」。
-    # 只回报键名与长度，不回明文（虽然指纹本身不敏感，但没必要外传）。
-    fp = await fingerprint()
-    fp_keys = [kv.split("=", 1)[0].strip() for kv in fp.split(";") if "=" in kv]
     out: Dict[str, Any] = {
         "bvid": bvid,
         "cid": cid,
         "title": (meta.get("title") or "")[:60],
         "duration_sec": int(cur.get("duration") or meta.get("duration") or 0),
-        "cookie_source": "session(访客扫码)" if session_cookie else ("env(BILI_COOKIE)" if BILI_COOKIE else "none(未登录)"),
+        "cookie_source": _cookie_source(session_cookie),
         "cookie_len": len(resolve_cookie(cookie)),
-        "fingerprint": {
-            "keys": fp_keys,
-            "has_buvid3": "buvid3" in fp_keys,
-            "has_buvid4": "buvid4" in fp_keys,
-            "has_b_nut": "b_nut" in fp_keys,
-            "cached_at": int(_fp_at),
-            "ttl": int(_FP_TTL),
-        },
+        # 把设备指纹的状态也报出来：排查 412 时，第一件要确认的就是「指纹到底拿到没有」。
+        # 只回报键名与长度，不回明文（虽然指纹本身不敏感，但没必要外传）。
+        "fingerprint": await _fingerprint_report(),
         "nav": await fetch_nav(cookie),
         "mp4_probe": [],
     }
@@ -1270,6 +1688,11 @@ async def _resolve_short(client: httpx.AsyncClient, url: str) -> str:
     * 正常短链：返回 301/302，``Location`` 就是视频页；
     * 无效短码：返回 **HTTP 200**，响应体是 ``{"code":-404,"message":"啥都木有"}``，
       不会跳转。所以不能只看状态码，还要从响应体里再挖一次地址。
+
+    **落地页不一定是普通视频**：番剧分享出来的短链会跳到
+    ``/bangumi/play/ep741735``，那里面**没有 BV 号**。早期版本只认 BV/av，
+    遇到番剧短链就会一路跟到底、最后报「短链已失效」——所以这里必须把
+    番剧路径也算作「跟到了目的地」。
     """
     current = url
     for _ in range(6):
@@ -1284,7 +1707,8 @@ async def _resolve_short(client: httpx.AsyncClient, url: str) -> str:
                 break
             if not loc.startswith("http"):
                 loc = "https://www.bilibili.com" + loc
-            if extract_bvid(loc) or extract_av_id(loc):
+            if (extract_bvid(loc) or extract_av_id(loc)
+                    or _BANGUMI_PATH_RE.search(loc)):
                 return loc
             current = loc
             continue
@@ -1310,6 +1734,257 @@ def _dig_url_from_body(text: str) -> Optional[str]:
     if m:
         return f"https://www.bilibili.com/video/{'BV' + m.group(0)[2:]}"
     return None
+
+
+async def _fetch_season(ep_id: Optional[int] = None,
+                        season_id: Optional[int] = None,
+                        cookie: str = "") -> Dict[str, Any]:
+    """获取番剧季信息（含剧集列表）。
+
+    ``pgc/view/web/season`` 只认 ``ep_id`` 与 ``season_id``——给它 ``media_id``
+    会返回 -404，所以 ``md`` 入口必须先过 ``pgc/view/web/media`` 换成 ``season_id``。
+    """
+    params: Dict[str, Any] = {"ep_id": ep_id} if ep_id else {"season_id": season_id}
+    body = await _api_get(_PGC_SEASON_API, params, cookie,
+                          referer=bangumi_referer(ep_id=ep_id, season_id=season_id))
+    code = int(body.get("code") or 0)
+    if code != 0:
+        raise ParseError(
+            _PGC_ERRORS.get(code) or body.get("message") or f"番剧解析失败（错误码 {code}）"
+        )
+    result = body.get("result")
+    if not isinstance(result, dict) or not result.get("episodes"):
+        raise ParseError("未获取到番剧剧集信息，该番剧可能已失效或受地区限制")
+
+    # 地区限制是**另一种**「能看介绍、下不到视频」的情况，和会员限制要分开提示
+    rights = result.get("rights") or {}
+    if int(rights.get("area_limit") or 0) and not int(rights.get("can_watch") or 1):
+        raise ParseError(
+            _PGC_ERRORS[10403] + "（接口标记 area_limit，本地区无法观看）"
+        )
+    return result
+
+
+async def _fetch_media(media_id: int, cookie: str = "") -> Dict[str, Any]:
+    """获取番剧媒体信息（只用来把 ``md`` 号换成 ``season_id``）。
+
+    ``media`` 返回的是**整部作品**的元信息（标题、封面、评分、以及 ``seasons`` 全部季），
+    但它**不含任何剧集**——剧集必须再查一次 ``season``。这是 ``md`` 入口最容易卡住的地方：
+    看到 ``media`` 里没有 ``episodes`` 会误以为接口有问题。
+    """
+    body = await _api_get(_PGC_MEDIA_API, {"media_id": media_id}, cookie,
+                          referer=_HOME_URL)
+    code = int(body.get("code") or 0)
+    if code != 0:
+        raise ParseError(
+            _PGC_ERRORS.get(code) or body.get("message") or f"番剧解析失败（错误码 {code}）"
+        )
+    result = body.get("result")
+    if not isinstance(result, dict) or not result.get("season_id"):
+        raise ParseError("未获取到番剧信息，该番剧可能已失效")
+    return result
+
+
+def _https(url: str) -> str:
+    """把 http 图床地址升成 https，避免 https 页面出现混合内容被浏览器拦掉。"""
+    u = (url or "").strip()
+    return "https://" + u[len("http://"):] if u.startswith("http://") else u
+
+
+def _bg_episode_item(e: Dict[str, Any], index: int, section: str = "") -> Dict[str, Any]:
+    """把接口的一条剧集记录整理成前端要用的结构。
+
+    ``locked`` 是**参考信息，不是判决**：它来自元数据（``status`` / ``badge``），
+    说明 B 站把这一集标记成了付费集。但用户如果登录了大会员，这一集其实是**能下**的
+    ——所以真正的可用性一律由带凭据的 playurl 实测决定（见 ``parse_bangumi``），
+    这里只用来在选集网格上画一个「会员」角标，以及给未登录用户一个预期。
+    """
+    status = int(e.get("status") or 0)
+    badge = (e.get("badge") or "").strip()
+    # badge 里可能出现「会员」「大会员」「限时免费」等文案，统一按「含会员二字」判定
+    locked = status != _PGC_EP_FREE or "会员" in badge
+    ms = int(e.get("duration") or 0)
+    return {
+        "ep_id": int(e.get("id") or 0),
+        "cid": int(e.get("cid") or 0),
+        "page": index,
+        # show_title 形如「第1话 犯人来了」；没有时退回 long_title / 编号
+        "part": (e.get("show_title") or e.get("long_title") or f"第{index}话").strip(),
+        "short": (e.get("title") or str(index)).strip(),
+        "long_title": (e.get("long_title") or "").strip(),
+        "duration_ms": ms,
+        "duration_text": _fmt_duration(ms // 1000) if ms else "",
+        "cover": _https(e.get("cover") or ""),
+        "locked": locked,
+        "badge": badge,
+        "section": section,
+    }
+
+
+def _bg_season_options(res: Dict[str, Any]) -> List[Dict[str, Any]]:
+    """从季信息里抽出「同作品的其他季」（多季番剧用）。"""
+    out: List[Dict[str, Any]] = []
+    for s in (res.get("seasons") or []):
+        sid = int(s.get("season_id") or 0)
+        if sid:
+            out.append({
+                "season_id": sid,
+                "title": (s.get("season_title") or s.get("title") or "").strip(),
+                "cover": _https(s.get("cover") or ""),
+                "current": sid == int(res.get("season_id") or 0),
+            })
+    return out
+
+
+async def parse_bangumi(raw: str, ep: Optional[int] = None,
+                        cookie: str = "") -> Dict[str, Any]:
+    """解析番剧（PGC）：ep / ss / md 链接，返回季信息 + 剧集列表 + 当前集的画质。
+
+    对外结构**刻意与 ``parse_share_url`` 保持同构**（前端才能复用同一张卡片），
+    只多出一个 ``kind="bangumi"`` 用于切换选集 UI。差异点：
+
+    * ``video_id`` 用 ``ep{id}`` / ``ss{id}`` 形式，下载时靠它回查；
+    * ``episodes`` 是**整季**的剧集列表（含会员角标），而 UGC 那边的 ``pages`` 只是分P；
+    * ``qualities`` 只对 ``ep`` 指向的**当前这一集**有效——因为剧集少则十几、多则上千，
+      把每一集的画质都探一遍会发出成百上千次请求，必然触发风控；所以切集的动作
+      由前端重新发起一次解析（带上 ``&ep=<ep_id>``）。
+
+    :param ep: 指定要解析哪一集（``ep_id``）。从链接里解析出 season 后，
+        默认取链接指向的那一集；传了它就覆盖。这是前端「点某一集」的实现方式。
+    """
+    ref = extract_bangumi_ref(raw)
+    if not ref:
+        raise ParseError("未在输入内容中识别出番剧链接，请粘贴 bangumi/play/ep… 或 ep/ss/md 编号")
+    kind, num = ref
+
+    if kind == "ep":
+        # 链接已经指向具体一集，直接查
+        res = await _fetch_season(ep_id=num, cookie=cookie)
+    elif kind == "ss":
+        res = await _fetch_season(season_id=num, cookie=cookie)
+    else:                                   # md：先换成 season_id
+        media = await _fetch_media(num, cookie=cookie)
+        res = await _fetch_season(season_id=int(media["season_id"]), cookie=cookie)
+
+    season_id = int(res.get("season_id") or 0)
+    episodes = res.get("episodes") or []
+
+    # 组装整季剧集列表：正片在前，PV / 花絮等分组依次跟在后面并带 section 标签。
+    # 分组信息必须保留——PV 和正片的编号是各自独立的，混成一条列表会出现两个「第1话」。
+    listing: List[Dict[str, Any]] = []
+    for i, e in enumerate(episodes, 1):
+        listing.append(_bg_episode_item(e, i))
+    for grp in (res.get("section") or []):
+        title = (grp.get("title") or "花絮").strip()
+        for i, e in enumerate(grp.get("episodes") or [], 1):
+            listing.append(_bg_episode_item(e, i, section=title))
+
+    if not listing:
+        raise ParseError("该番剧没有可解析的剧集")
+
+    # 选定当前集：优先用前端点的 ep，其次用链接里的 ep，最后退回第一集
+    want_ep = ep or (num if kind == "ep" else 0)
+    cur = next((x for x in listing if x["ep_id"] == want_ep), None) or listing[0]
+
+    title = (res.get("season_title") or res.get("title") or "").strip()
+
+    # ---- 当前集的画质（真正决定「能不能下」的地方）----
+    official_ms = int(cur["duration_ms"] or 0)
+    unavailable: Optional[Dict[str, str]] = None
+    try:
+        mp4 = await _collect_qualities_pgc(cur["ep_id"], cur["cid"], cookie,
+                                           official_ms=official_ms)
+        # 番剧的 DASH 时长以**秒**为单位，官方 episode.duration 是毫秒
+        dash = await collect_dash_qualities_pgc(cur["ep_id"], cur["cid"], cookie,
+                                                duration=official_ms // 1000)
+        qualities = merge_formats(mp4, dash)
+    except ContentLocked as e:
+        # 会员集未登录：卡片照常展示，但明确告知下不了——不做欺骗性展示
+        qualities = []
+        unavailable = {"reason": e.reason, "message": str(e)}
+    except ParseError as e:
+        qualities = []
+        unavailable = {"reason": "unknown", "message": str(e)}
+
+    logged_in = bool(resolve_cookie(cookie))
+    up = res.get("up_info") or {}
+    author = (up.get("nickname") or up.get("uname") or "哔哩哔哩番剧").strip()
+    author_avatar = _https(up.get("avatar") or "")
+
+    evaluate = (res.get("evaluate") or "").strip()
+    areas = "、".join(a.get("name", "") for a in (res.get("areas") or []) if a.get("name"))
+    styles = "、".join(res.get("styles") or [])
+    total = int(res.get("total") or len(episodes))
+    new_ep = (res.get("new_ep") or {}).get("desc") or ""
+
+    # 番剧摘要自己拼，不复用 make_summary：那边的兜底文案是「UP 主发布于哔哩哔哩平台」，
+    # 用在番剧上不合适。这里优先用官方简介（evaluate），没有就退回「地区 · 类型 · 集数」。
+    bio = []
+    if areas:
+        bio.append(f"地区：{areas}")
+    if styles:
+        bio.append(f"类型：{styles}")
+    bio.append(f"全 {total} 话" if total else f"共 {len(episodes)} 话")
+    if new_ep:
+        bio.append(new_ep)
+    bio_line = " · ".join(bio)
+    summary = (evaluate + "\n" + bio_line) if evaluate else bio_line
+
+    return {
+        "ok": True,
+        "platform": "bilibili",
+        "kind": "bangumi",
+        "video_id": f"ep{cur['ep_id']}",
+        "season_id": season_id,
+        "media_id": int(res.get("media_id") or 0),
+        "ep_id": cur["ep_id"],
+        "cid": cur["cid"],
+        "title": title or "（无标题）",
+        "episode_title": cur["part"],
+        "summary": summary,
+        "cover": _https(cur.get("cover") or res.get("cover") or ""),
+        "author": author,
+        "author_avatar": author_avatar,
+        "duration_ms": official_ms,
+        "duration_text": cur["duration_text"],
+        "page_title": cur["part"],
+        "current_page": cur["page"],
+        "total_pages": len(listing),
+        "logged_in": logged_in,
+        "episodes": listing,
+        "seasons": _bg_season_options(res),
+        "unavailable": unavailable,
+        "qualities": qualities,
+    }
+
+
+# ---------------------------------------------------------------- 统一入口
+
+async def parse(raw: str, page: Optional[int] = None, ep: Optional[int] = None,
+                cookie: str = "") -> Dict[str, Any]:
+    """哔哩哔哩统一解析入口：自动区分普通投稿（UGC）与番剧（PGC）。
+
+    放在这里而不是 ``main.py``，是为了让「怎么区分」只有一份实现——
+    前端实时提示、后端真正路由若有各自的判定规则，迟早会不一致。
+
+    短链（b23.tv）必须**先跟随后判断**：跳转前只是一串随机字符，无从知道
+    落地是普通视频还是番剧。跟随后再判断，链接类型就完全确定了。
+    """
+    text = (raw or "").strip()
+    if not text:
+        raise ParseError("请输入哔哩哔哩链接")
+
+    url = extract_share_url(text)
+    if url and not re.match(r"^https?://", url, re.I):
+        url = "https://" + url
+    if url and is_bilibili_short_link(url):
+        url = await _resolve_short(_ensure_client(), url)
+
+    # 已经还原过的长链直接往下传，避免 parse_share_url 内部再跟随一次短链
+    target = url or text
+    if is_bangumi_input(target):
+        return await parse_bangumi(target, ep=ep, cookie=cookie)
+    return await parse_share_url(target, page=page, cookie=cookie)
 
 
 async def parse_share_url(raw: str, page: Optional[int] = None,
@@ -1348,6 +2023,15 @@ async def parse_share_url(raw: str, page: Optional[int] = None,
     bvid = extract_bvid(url) or extract_bvid(text)
     aid = None if bvid else (extract_av_id(url) or extract_av_id(text))
     if not bvid and not aid:
+        # 走到这里说明既没有 BV/av，也没被判成番剧（否则会走 parse_bangumi）。
+        # 但如果文本里确实出现了 ep/ss/md 号，多半是「文案里带着番剧号、却没带链接」，
+        # 给一句更贴切的提示，比笼统的「无法识别编号」有用得多。
+        if _BANGUMI_HINT_RE.search(text):
+            raise ParseError(
+                "这看起来是番剧编号，但缺少完整链接。请粘贴完整地址"
+                "（例如 https://www.bilibili.com/bangumi/play/ep741735），"
+                "或只保留编号本身（如 ep741735）"
+            )
         raise ParseError("无法从链接中识别视频编号，请确认是完整的 B 站视频链接")
 
     meta = await _fetch_view(bvid=bvid, aid=aid, cookie=cookie)

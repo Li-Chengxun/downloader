@@ -12,8 +12,9 @@
 
 两个平台各自一个解析模块：
 - ``parser.py``   抖音（双引擎：Evil0ctal API + 本地分享页）
-- ``bilibili.py`` 哔哩哔哩（官方 web 接口，durl 完整 MP4）
-对外返回的数据结构一致，前端复用同一张结果卡片。
+- ``bilibili.py`` 哔哩哔哩（官方 web 接口，durl 完整 MP4；内部再分普通投稿 UGC 与番剧 PGC）
+对外返回的数据结构一致，前端复用同一张结果卡片（番剧多一个 ``kind="bangumi"``
+字段，用于切换选集 UI）。
 
 关于扫码登录的凭据归属（重要）：
 B 站未登录时只能下到 720P，登录后可解锁 1080P 及以上。凭据按**浏览器会话**
@@ -136,9 +137,9 @@ def _detect_platform(text: str) -> str:
     """按输入判断属于哪个平台。
 
     判定优先级（越靠前越明确）：
-    1. 含 B 站域名（bilibili.com / b23.tv）→ bilibili
+    1. 含 B 站域名（bilibili.com / b23.tv）→ bilibili  （番剧链接走的就是这条）
     2. 含抖音域名（douyin.com / iesdouyin.com）→ douyin
-    3. 含裸视频号（BV… / av…）→ bilibili   用户常直接粘贴裸号
+    3. 含裸编号（BV… / av… / ep… / ss… / md…）→ bilibili   用户常直接粘贴裸号
     4. 都识别不出 → 按抖音处理
 
     第 3 步放在抖音之后，是为了避免抖音分享文案里恰好出现 ``BV…`` 字样时被误判；
@@ -146,6 +147,10 @@ def _detect_platform(text: str) -> str:
 
     识别不出时默认抖音，以便沿用原有的报错文案（抖音侧会明确提示
     「这不是抖音链接」，比统一报「无法识别」更有指导性）。
+
+    注意：这里只需判断到「B 站」这一层，**不必**再细分普通视频 / 番剧——
+    那是 ``bilibili.parse`` 内部的事，前端提示与后端路由共用同一份实现，
+    避免两边规则不一致（历史上就吃过这个亏）。
     """
     link = bili.extract_share_url(text) or text
     if bili.is_bilibili_link(link):
@@ -164,12 +169,15 @@ async def api_parse(
     request: Request,
     url: str = Query(..., description="抖音 / 哔哩哔哩 分享链接或整段分享文字"),
     p: Optional[int] = Query(None, description="哔哩哔哩分P序号（从 1 开始），可选"),
+    ep: Optional[int] = Query(None, description="哔哩哔哩番剧单集 ep_id，可选"),
 ):
     try:
         if _detect_platform(url) == "bilibili":
             # 带上本会话的登录凭据，已登录时自动解锁更高画质
             sess = request.state.session
-            return await bili.parse_share_url(url, page=p, cookie=sess.bili_cookie)
+            # bili.parse 是 B 站统一入口，内部自行区分普通投稿与番剧，
+            # 前端不需要（也不应该）自己判断该传哪个参数
+            return await bili.parse(url, page=p, ep=ep, cookie=sess.bili_cookie)
         data = await douyin.parse_share_url(url)
         data.setdefault("platform", "douyin")
         return data
@@ -279,16 +287,19 @@ async def api_bili_logout(request: Request):
 
 @app.get("/api/bili/debug")
 async def api_bili_debug(request: Request,
-                         url: str = Query(..., description="B 站视频链接"),
-                         p: Optional[int] = Query(None, description="分P序号，可选")):
-    """诊断画质问题：逐档探测并回报接口真实返回（不含凭据明文）。
+                         url: str = Query(..., description="B 站视频 / 番剧链接"),
+                         p: Optional[int] = Query(None, description="分P序号，可选"),
+                         ep: Optional[int] = Query(None, description="番剧单集 ep_id，可选")):
+    """诊断画质 / 播放权限问题：逐档探测并回报接口真实返回（不含凭据明文）。
 
-    用于排查「登录了还是只有 720P」——能区分是视频本身上限、凭据未生效，
+    普通视频用于排查「登录了还是只有 720P」——能区分是视频本身上限、凭据未生效，
     还是 MP4 格式拿不到更高档位。
+    番剧则额外回报 ``is_preview`` 与「返回时长 vs 官方时长」，用于识别
+    「解析成功但下到的只是三分钟试看」这种情况。
     """
     try:
         return {"ok": True, "data": await bili.debug_qualities(
-            url, page=p, cookie=request.state.session.bili_cookie)}
+            url, page=p, ep=ep, cookie=request.state.session.bili_cookie)}
     except _PARSE_ERRORS as e:
         return JSONResponse(status_code=422, content={"ok": False, "message": str(e)})
     except httpx.HTTPError:
@@ -300,11 +311,12 @@ async def api_bili_debug(request: Request,
 @app.get("/api/dash")
 async def api_dash(
     request: Request,
-    bvid: str = Query(..., description="视频 BV 号"),
+    bvid: str = Query("", description="视频 BV 号（普通投稿用）"),
     cid: int = Query(..., description="分P 的 cid"),
     qn: int = Query(0, description="目标清晰度，0 表示最高档"),
     codecid: int = Query(0, description="目标编码，0 表示自动（优先 H.264）"),
     filename: str = Query("video.mp4", description="保存文件名"),
+    ep_id: int = Query(0, description="番剧单集 ep_id（番剧用，传了它则忽略 bvid）"),
 ):
     """下载 DASH 高清档位：服务端合并音视频后返回完整 MP4。
 
@@ -313,13 +325,17 @@ async def api_dash(
 
     这里传 bvid/cid/qn 而**不是**直链：DASH 的直链带时效签名，重新解析时可能已过期，
     让服务端在下载那一刻重新申请，天然规避过期问题。
+
+    番剧传的标识是 ``ep_id``（B 站番剧没有 bvid 体系），二选一，不会同时给。
     """
     if not bili.dash_supported():
         raise HTTPException(status_code=503, detail="服务器未安装 ffmpeg，无法合并 DASH 音视频流")
+    if not bvid and not ep_id:
+        raise HTTPException(status_code=400, detail="缺少视频标识：普通视频传 bvid，番剧传 ep_id")
 
     try:
         path = await bili.build_dash_file(
-            bvid, cid, qn=qn, codecid=codecid,
+            bvid, cid, qn=qn, codecid=codecid, ep_id=ep_id,
             cookie=request.state.session.bili_cookie,
         )
     except _PARSE_ERRORS as e:

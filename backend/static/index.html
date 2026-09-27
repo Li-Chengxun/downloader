@@ -99,6 +99,63 @@
     color:#fff;background:var(--primary);border-color:var(--primary);font-weight:700;
   }
 
+  /* 番剧选集：用**网格**而不是分P那样的横滑条——长篇番剧动辄上百集，
+     横滑要一路拖到底，网格能直接扫视全部集数。 */
+  .eps{margin-top:14px;}
+  .eps-head{display:flex;align-items:baseline;gap:8px;flex-wrap:wrap;margin-bottom:8px;font-size:13px;}
+  .eps-head .t{color:var(--ink-soft);}
+  .eps-head .cur{font-weight:700;color:var(--bili);}
+  .eps-scroll{
+    max-height:230px;overflow-y:auto;border:1px solid var(--line);
+    border-radius:12px;background:#fbfefc;
+  }
+  .eps-grid{
+    display:grid;grid-template-columns:repeat(auto-fill,minmax(54px,1fr));
+    gap:6px;padding:8px;
+  }
+  .ep-btn{
+    position:relative;padding:8px 4px;font-size:13px;font-weight:600;color:var(--ink-soft);
+    background:#fff;border:1.5px solid var(--line);border-radius:8px;cursor:pointer;
+    font-family:inherit;transition:all .15s;overflow:hidden;
+    text-overflow:ellipsis;white-space:nowrap;
+  }
+  .ep-btn:hover{border-color:#e9b0c6;color:var(--ink);}
+  .ep-btn.active{color:#fff;background:var(--bili);border-color:var(--bili);font-weight:700;}
+  /* 会员专享角标：只是「这一集是付费集」的提示，不代表一定下不了
+     ——登录大会员后同一集就能下，所以不把按钮禁用掉。 */
+  .ep-btn.locked::after{
+    content:'会员';position:absolute;top:0;right:0;font-size:9px;line-height:1.2;
+    padding:1px 3px;border-bottom-left-radius:6px;font-weight:700;
+    background:linear-gradient(135deg,#ffe9a8,#ffd064);color:#8a5a00;
+  }
+  .ep-btn.active.locked::after{background:#fff5cc;color:#8a5a00;}
+  /* 正片之后的 PV / 花絮分组标题（横跨整行） */
+  .ep-sec{
+    grid-column:1/-1;font-size:12px;font-weight:700;color:var(--ink-soft);
+    margin:8px 0 0;padding-top:8px;border-top:1px dashed var(--line);
+  }
+  .ep-sec:first-child{border-top:none;margin-top:0;padding-top:0;}
+
+  /* 同作品的其他季（长篇番剧的分季切换） */
+  .seasons{display:flex;gap:6px;overflow-x:auto;padding:8px 0 4px;}
+  .season-btn{
+    flex:0 0 auto;max-width:210px;padding:5px 11px;font-size:12.5px;font-weight:600;
+    color:#a83b6b;background:#fdeef4;border:1.5px solid #f7cfdd;border-radius:999px;
+    cursor:pointer;font-family:inherit;transition:all .15s;
+    overflow:hidden;text-overflow:ellipsis;white-space:nowrap;
+  }
+  .season-btn:hover{border-color:var(--bili);}
+  .season-btn.on{color:#fff;background:var(--bili);border-color:var(--bili);font-weight:700;}
+
+  /* 「本集不可下载」——会员专享 / 地区限制。用醒目的暖色而不是红色：
+     这不是错误，只是当前账号权限不够，卡片其余部分仍然可用。 */
+  .locked-note{
+    margin-top:16px;padding:13px 15px;border-radius:12px;font-size:13.5px;
+    line-height:1.8;text-align:left;
+    background:#fffaf0;border:1px solid #f4e2b8;color:#8a6a1e;
+  }
+  .locked-note b{color:#7a5a10;}
+
   /* 登录状态条 */
   .login-bar{
     display:flex;align-items:center;gap:10px;flex-wrap:wrap;
@@ -274,7 +331,7 @@
         <img :src="coverSrc" class="cover" alt="视频封面" @click="preview = true">
       </div>
       <h2 class="title">
-        <span class="badge" :class="{ bili: isBili }">{{ isBili ? '哔哩哔哩' : '抖音' }}</span>
+        <span class="badge" :class="{ bili: isBili }">{{ isBangumi ? '哔哩哔哩番剧' : (isBili ? '哔哩哔哩' : '抖音') }}</span>
         {{ result.title }}
       </h2>
       <div class="meta">
@@ -284,7 +341,8 @@
       </div>
       <div class="summary"><b>内容简介：</b>{{ result.summary }}</div>
 
-      <div class="pages" v-if="result.total_pages > 1">
+      <!-- 普通视频：分P切换 -->
+      <div class="pages" v-if="!isBangumi && result.total_pages > 1">
         <div class="pages-head">本视频共 {{ result.total_pages }} 个分P，点击切换：</div>
         <div class="pages-list">
           <button v-for="pg in result.pages" :key="pg.page" class="page-btn"
@@ -292,6 +350,39 @@
                   :title="'P' + pg.page + ' ' + pg.part + ' · ' + pg.duration_text"
                   @click="selectPage(pg.page)">P{{ pg.page }} · {{ pg.part }}</button>
         </div>
+      </div>
+
+      <!-- 番剧：整季选集（正片 + PV/花絮分组） -->
+      <div class="eps" v-if="isBangumi">
+        <div class="eps-head">
+          <span class="t">共 {{ result.total_pages }} 集（含花絮），点击切换：</span>
+          <span class="cur">▶ {{ result.episode_title }}</span>
+        </div>
+        <div class="eps-scroll">
+          <div class="eps-grid">
+            <template v-for="(ep, i) in result.episodes" :key="ep.ep_id">
+              <div v-if="ep.section && (i === 0 || result.episodes[i-1].section !== ep.section)"
+                   class="ep-sec">{{ ep.section }}</div>
+              <button class="ep-btn"
+                      :class="{ active: ep.ep_id === result.ep_id, locked: ep.locked }"
+                      :title="ep.part + (ep.duration_text ? ' · ' + ep.duration_text : '') + (ep.locked ? ' · 会员专享' : '')"
+                      @click="selectEpisode(ep)">{{ ep.short }}</button>
+            </template>
+          </div>
+        </div>
+        <!-- 同作品的其他季：长篇番剧（如柯南）有几十季，用横滑条避免占满屏 -->
+        <div class="seasons" v-if="(result.seasons || []).length > 1">
+          <button v-for="s in result.seasons" :key="s.season_id" class="season-btn"
+                  :class="{ on: s.current }" :title="s.title"
+                  @click="selectSeason(s)">{{ s.title || ('S' + s.season_id) }}</button>
+        </div>
+      </div>
+
+      <!-- 本集下不了时的说明（会员专享 / 地区限制）。
+           刻意不把它做成弹窗或错误：标题、封面、选集都还是好的，
+           用户需要的是「为什么下不了、怎么才能下」而不是一个红叉。 -->
+      <div v-if="result.unavailable" class="locked-note">
+        <b>🔒 本集暂不可下载</b><br>{{ result.unavailable.message }}
       </div>
 
       <!-- B 站登录状态条 -->
@@ -304,7 +395,12 @@
             <template v-if="login.source === 'env'">（服务器统一账号）</template>
           </template>
           <template v-else>
-            未登录 · 当前最高 {{ topQuality }}；登录后按账号权益解锁更高画质（1080P 及以上需大会员）
+            <template v-if="isBangumi">
+              未登录 · 番剧的会员集在未登录时只能看到试看片段；登录大会员后可下载完整正片
+            </template>
+            <template v-else>
+              未登录 · 当前最高 {{ topQuality }}；登录后按账号权益解锁更高画质（1080P 及以上需大会员）
+            </template>
           </template>
         </span>
         <button v-if="login.logged_in && login.can_logout" class="mini-btn ghost" @click="logoutBili">退出</button>
@@ -327,6 +423,11 @@
         <div class="diag-meta">
           凭据：{{ diag.data.cookie_source }} ·
           账号：{{ diag.data.nav && diag.data.nav.is_login ? diag.data.nav.name : '未登录' }}<template v-if="diag.data.nav && diag.data.nav.is_login"> · {{ diag.data.nav.vip ? '大会员' : '非大会员' }}</template>
+          <template v-if="diag.data.kind === 'bangumi'">
+            <br>番剧：{{ diag.data.title }} · {{ diag.data.episode_title }}（ep{{ diag.data.ep_id }}）
+            · 官方时长 {{ diag.data.official_duration_sec }} 秒
+            · 共 {{ diag.data.episode_total }} 集，其中会员集 {{ diag.data.episode_locked }} 个
+          </template>
         </div>
         <table class="diag-table">
           <thead><tr><th>请求档位</th><th>实际返回</th><th>可下</th></tr></thead>
@@ -345,13 +446,14 @@
         </table>
       </div>
 
-      <h3>选择清晰度下载</h3>
-      <p class="muted" v-if="mergeCount">
-        其中 {{ mergeCount }} 个高清档位（1080P60 / 4K / HDR 等）原始形态是音视频分离的，
-        由服务器合并后输出完整 MP4，点击后请耐心等待。
-      </p>
-      <div v-if="dlError" class="dl-error">⚠️ {{ dlError }}</div>
-      <div class="qualities">
+      <template v-if="(result.qualities || []).length">
+        <h3>选择清晰度下载</h3>
+        <p class="muted" v-if="mergeCount">
+          其中 {{ mergeCount }} 个高清档位（1080P60 / 4K / HDR 等）原始形态是音视频分离的，
+          由服务器合并后输出完整 MP4，点击后请耐心等待。
+        </p>
+        <div v-if="dlError" class="dl-error">⚠️ {{ dlError }}</div>
+        <div class="qualities">
         <div v-for="q in result.qualities" :key="q.key" class="q-item" :class="{ best: q.best }">
           <div class="q-label">
             <span class="q-name">{{ q.label }}</span>
@@ -366,7 +468,8 @@
             {{ busyKey === q.key ? '⏳ 合并中…' : (q.needs_merge ? '⬇ 合并并下载' : '⬇ 下载视频') }}
           </a>
         </div>
-      </div>
+        </div>
+      </template>
     </section>
 
     <footer>
@@ -437,7 +540,7 @@ const { createApp, ref, computed } = Vue;
 // 否则会出现「前端提示哔哩哔哩、实际却按抖音解析」的错位。
 const PH = {
   placeholder: '粘贴抖音 / 哔哩哔哩 分享链接，自动识别平台',
-  tip: '支持抖音短链 v.douyin.com 及「复制链接」得到的整段分享文字；支持 B 站 b23.tv 短链、bilibili.com/video/BV… 长链、裸 BV / av 号，多分P视频解析后可切换选集',
+  tip: '支持抖音短链 v.douyin.com 及「复制链接」得到的整段分享文字；支持 B 站 b23.tv 短链、bilibili.com/video/BV… 长链、裸 BV / av 号，多分P视频解析后可切换选集；也支持 B 站番剧（bangumi/play/ep… 或 ss… / md…），解析后可切换集数',
   empty: '请先粘贴视频分享链接',
 };
 
@@ -449,11 +552,14 @@ const POLL_MS = 2000;
 // 「前端提示哔哩哔哩、实际却按抖音解析」的错位：
 //   1) 文本里有链接就先抽出来判定（分享文案里可能混着无关域名）
 //   2) 先认 B 站域名，再认抖音域名
-//   3) 最后才认裸视频号（BV… / av…）——它放在域名之后，是为了避免抖音
-//      分享文案里恰好出现「BV…」字样时被误判成 B 站
-// 正则与后端 _BV_RE / _AV_RE 对齐。
+//   3) 最后才认裸编号（BV… / av… / 番剧 ep…·ss…·md…）——它放在域名之后，
+//      是为了避免抖音分享文案里恰好出现「BV…」字样时被误判成 B 站
+// 正则与后端 _BV_RE / _AV_RE / _BANGUMI_BARE_RE 对齐。
 const RE_BV = /bv[0-9a-z]{10}/;
 const RE_AV = /(?:^|[^\w])av(\d{1,12})(?:[^\d]|$)/;
+// 裸番剧编号：**整串**匹配（与后端 _BANGUMI_BARE_RE 一致）。
+// 不能放宽成「在文本里搜」——那样抖音文案里的 md5 会被当成番剧号。
+const RE_BANGUMI_BARE = /^[#\s]*(ep|ss|md)[\s\-_]*(\d{1,9})\s*$/i;
 
 function detectPlatform(text) {
   const raw = (text || '').trim();
@@ -464,7 +570,7 @@ function detectPlatform(text) {
   if (/douyin\.com|iesdouyin\.com/.test(link)) return 'douyin';
   // 注意这里不能用「仅当没找到链接时」作条件：后端无论有没有链接都会查裸号，
   // 所以 https://example.com/BV1GJ411x7h7 这种也会被判为 B 站，前端必须一致。
-  if (RE_BV.test(link) || RE_AV.test(link)) return 'bilibili';
+  if (RE_BV.test(link) || RE_AV.test(link) || RE_BANGUMI_BARE.test(link)) return 'bilibili';
   return '';
 }
 
@@ -488,6 +594,8 @@ createApp({
     let pollTimer = null;
 
     const isBili = computed(() => !!result.value && result.value.platform === 'bilibili');
+    // 番剧（PGC）与普通投稿（UGC）的选集方式完全不同，前端据此切换 UI
+    const isBangumi = computed(() => !!result.value && result.value.kind === 'bangumi');
     const topQuality = computed(() => {
       const qs = (result.value && result.value.qualities) || [];
       return qs.length ? qs[0].label : '—';
@@ -508,7 +616,10 @@ createApp({
       detected.value = detectPlatform(url.value);
     }
 
-    async function parse(page) {
+    // page = 普通视频的分P；ep = 番剧的单集号。两者互斥，只会传一个。
+    // 番剧切集必须**重新解析**：一季可能有几十上百集，把每一集的画质都探一遍会发出
+    // 成百上千次请求，必然被风控拦。服务端只探当前这一集，切集由前端再发一次请求。
+    async function parse(page, ep) {
       if (!url.value) { error.value = PH.empty; return; }
       loading.value = true;
       error.value = '';
@@ -518,6 +629,7 @@ createApp({
       try {
         let api = '/api/parse?url=' + encodeURIComponent(url.value);
         if (page) api += '&p=' + page;              // 仅分P切换时带，抖音侧会忽略
+        if (ep) api += '&ep=' + ep;                 // 仅番剧切集时带
         const r = await fetch(api);
         let data = null;
         try { data = await r.json(); } catch (e) { /* 非 JSON 响应 */ }
@@ -548,6 +660,21 @@ createApp({
       parse(page);
     }
 
+    // 番剧切集
+    function selectEpisode(ep) {
+      const cur = result.value;
+      if (!cur || ep.ep_id === cur.ep_id) return;
+      parse(undefined, ep.ep_id);
+    }
+
+    // 切换同作品的其他季：换掉输入框里的链接再重新解析，
+    // 让输入框始终如实反映「当前正在解析的是什么」，避免用户困惑。
+    function selectSeason(s) {
+      if (!s || s.current) return;
+      url.value = 'https://www.bilibili.com/bangumi/play/ss' + s.season_id;
+      parse();
+    }
+
     // 需要服务端合并音轨的档位数量（用于给出「为什么要等」的说明）
     const mergeCount = computed(() => {
       const qs = (result.value && result.value.qualities) || [];
@@ -556,6 +683,11 @@ createApp({
 
     function downloadName(q) {
       const base = result.value;
+      if (base.kind === 'bangumi') {
+        // 番剧用「番剧名-集名-画质」——只写 video_id（ep741735）用户根本认不出是哪一集
+        return (base.title + '-' + (base.episode_title || base.video_id) + '-' + q.label)
+          .replace(/[\\/:*?"<>|\s]+/g, '_') + '.mp4';
+      }
       const pageTag = base.total_pages > 1 ? '-P' + base.current_page : '';
       return (base.author + '-' + base.video_id + pageTag + '-' + q.label)
         .replace(/[\\/:*?"<>|\s]+/g, '_') + '.mp4';
@@ -564,10 +696,14 @@ createApp({
     function downloadUrl(q) {
       const base = result.value;
       const filename = encodeURIComponent(downloadName(q));
-      // DASH 档位：把 bvid/cid 交给后端，由它在下载那一刻重新申请直链
+      // DASH 档位：把标识交给后端，由它在下载那一刻重新申请直链
       // （直链带时效签名，存下来再传回来可能已过期），下载后调 ffmpeg 合并。
+      // 番剧没有 bvid 体系，用 ep_id 定位单集。
       if (q.format === 'dash') {
-        return '/api/dash?bvid=' + encodeURIComponent(base.video_id)
+        const idPart = base.kind === 'bangumi'
+          ? 'ep_id=' + encodeURIComponent(base.ep_id)
+          : 'bvid=' + encodeURIComponent(base.video_id);
+        return '/api/dash?' + idPart
              + '&cid=' + encodeURIComponent(base.cid)
              + '&qn=' + encodeURIComponent(q.qn)
              + '&codecid=' + encodeURIComponent(q.codecid || 0)
@@ -719,9 +855,13 @@ createApp({
 
     function reparse() {
       const cur = result.value;
-      if (cur && cur.platform === 'bilibili' && url.value) {
-        parse(cur.total_pages > 1 ? cur.current_page : undefined);
+      if (!cur || cur.platform !== 'bilibili' || !url.value) return;
+      // 番剧要带回当前集号，否则会退回第一集——用户扫完码回来发现跳集了会很困惑
+      if (cur.kind === 'bangumi') {
+        parse(undefined, cur.ep_id);
+        return;
       }
+      parse(cur.total_pages > 1 ? cur.current_page : undefined);
     }
 
     async function logoutBili() {
@@ -749,7 +889,9 @@ createApp({
       try {
         let api = '/api/bili/debug?url=' + encodeURIComponent(url.value);
         const cur = result.value;
-        if (cur && cur.total_pages > 1) api += '&p=' + cur.current_page;
+        // 番剧诊断要对准**当前这一集**：同一个 ep 号才有意义
+        if (cur && cur.kind === 'bangumi') api += '&ep=' + cur.ep_id;
+        else if (cur && cur.total_pages > 1) api += '&p=' + cur.current_page;
         const r = await fetch(api);
         const d = await r.json();
         if (!r.ok || !d.ok) {
@@ -757,12 +899,19 @@ createApp({
           return;
         }
         const x = d.data;
+        // 番剧的「可下」判定多一条：时长明显短于官方标称 = 只是试看片段。
+        // 这与后端 _is_preview_payload 的口径一致（is_preview=1 或返回时长 < 官方 90%）。
+        const bg = x.kind === 'bangumi';
         const rows = (x.mp4_probe || []).map((p) => {
           const got = p.quality_got;
           const bytes = p.size_bytes;
+          const preview = bg && (p.is_preview === 1 || p.truncated);
           return {
             ask: p.ask, askName: qnName(p.ask), gotName: qnName(got),
-            ok: !!got, size: bytes ? (bytes / 1024 / 1024).toFixed(1) + ' MB' : '',
+            ok: !!got && !preview,
+            size: preview
+              ? '仅试看 ' + (p.returned_sec || 0) + 's'
+              : (bytes ? (bytes / 1024 / 1024).toFixed(1) + ' MB' : ''),
           };
         });
         const dashRows = ((x.dash || {}).video_qualities || [])
@@ -779,9 +928,9 @@ createApp({
     loadLogin();          // 页面打开时查一次登录态
 
     return {
-      url, loading, error, result, preview, ph, isBili, coverSrc, avatarSrc,
+      url, loading, error, result, preview, ph, isBili, isBangumi, coverSrc, avatarSrc,
       topQuality, login, qr, diag, busyKey, dlError, mergeCount, detected,
-      autoDetect, parse, selectPage, downloadUrl, onDownload,
+      autoDetect, parse, selectPage, selectEpisode, selectSeason, downloadUrl, onDownload,
       openQr, closeQr, logoutBili, runDiag,
     };
   }
