@@ -25,6 +25,10 @@ services:
       # 哔哩哔哩：留空即可（网页上可扫码登录，凭据按浏览器会话隔离存内存）；
       # 填 Cookie 则作为服务端统一账号兜底，访客自己的扫码登录优先于它
       BILI_COOKIE: "${BILI_COOKIE:-}"
+      # B 站风控调优（一般无需改动，详见 .env.example「哔哩哔哩风控调优」）
+      BILI_FP_TTL: "${BILI_FP_TTL:-21600}"
+      BILI_412_RETRY: "${BILI_412_RETRY:-2}"
+      BILI_MIN_INTERVAL: "${BILI_MIN_INTERVAL:-0.2}"
       # 下载域名白名单的额外放通项（一般无需配置）
       EXTRA_DOUYIN_HOSTS: "${EXTRA_DOUYIN_HOSTS:-}"
       EXTRA_BILIBILI_HOSTS: "${EXTRA_BILIBILI_HOSTS:-}"

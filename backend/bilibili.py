@@ -36,6 +36,32 @@
 * ``view``：``62002`` 稿件不可见 / 已失效；``-404`` 不存在
 * ``playurl``：``-404`` 付费或需要登录（``rights.pay == 1``）
 * ``qrcode/poll``：``86101`` 未扫码 / ``86090`` 已扫待确认 / ``86038`` 已失效 / ``0`` 成功
+
+风控（HTTP 412）——本模块最容易踩的坑，单独说明：
+
+B 站 ``api.bilibili.com`` 前面有一层风控网关。它不看你的业务参数，只看**这个请求
+像不像真实浏览器发出来的**。命中即直接返回 ``HTTP 412 Precondition Failed``，
+连 JSON 都不给。实测触发条件按影响从大到小排：
+
+1. **请求不带任何 Cookie**（``buvid3`` 缺失）。这是最致命的一条——同一台机器、
+   同一个接口，不带 buvid3 必 412，带上就正常返回。而未登录用户天然没有 Cookie，
+   所以「裸请求」是这个项目线上最常被拦的形态。
+2. **请求头残缺**。只有 ``UA + Referer`` 的请求会被判为脚本；真实 Chrome 首屏
+   还会带 ``Origin`` / ``Accept`` / ``sec-ch-ua`` / ``sec-fetch-*``。Referer
+   精确到视频页比只给站点首页更宽松。
+3. **零间隔连发**。一次解析要发近十个请求（view + 逐档 playurl + dash），
+   机房 IP 上这种突发很容易被限。
+4. **IP 本身已被标记**（机房 IP 段被批量风控）。这条改代码解决不了，
+   只能在服务器上配 ``BILI_COOKIE`` 抬升信誉度，或换 IP。
+
+对应地，本模块做了四层防护，全部对调用方透明：
+
+* ``fingerprint()``：启动后按需抓一套设备指纹（首页 ``Set-Cookie`` 拿
+  ``buvid3`` / ``b_nut``，``x/frontend/finger/spi`` 补 ``buvid4``），缓存复用，
+  **所有**接口请求都带上——包括未登录用户；
+* ``_browser_headers()``：把请求头补齐成真实 Chrome 的样子；
+* ``_throttle()``：给接口请求加全局最小间隔，把突发摊平；
+* ``_api_get()``：命中 412 时自动换一套指纹退避重试，仍失败才回报用户。
 """
 
 from __future__ import annotations
@@ -43,8 +69,12 @@ from __future__ import annotations
 import asyncio
 import os
 import re
+import secrets
 import shutil
+import subprocess
+import sys
 import tempfile
+import time
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 from urllib.parse import urlparse
@@ -63,6 +93,25 @@ BILI_COOKIE = os.environ.get("BILI_COOKIE", "").strip()
 _API = "https://api.bilibili.com"
 _VIEW_API = f"{_API}/x/web-interface/view"
 _PLAYURL_API = f"{_API}/x/player/playurl"
+
+# ---------------------------------------------------------------- 风控相关配置
+
+#: 站点首页：设备指纹（buvid3 / b_nut）由这里下发，也是默认 Referer
+_HOME_URL = "https://www.bilibili.com/"
+
+#: 设备指纹接口，返回 ``b_3``（buvid3）与 ``b_4``（buvid4）
+_FINGER_API = f"{_API}/x/frontend/finger/spi"
+
+#: 设备指纹缓存时长（秒），默认 6 小时。
+#: 太短则每次解析都要多花两次请求；太长则一套指纹被风控盯上后会一直用旧的。
+_FP_TTL = float(os.environ.get("BILI_FP_TTL", "21600"))
+
+#: 命中 412 后「换一套指纹重试」的次数（默认 2，即最多发 3 次）。
+_RETRY_412 = int(os.environ.get("BILI_412_RETRY", "2"))
+
+#: 两次 B 站接口请求之间的全局最小间隔（秒），默认 0.2。
+#: 设为 0 可关闭；调大更稳但解析更慢。
+_MIN_INTERVAL = float(os.environ.get("BILI_MIN_INTERVAL", "0.2"))
 
 # ---------------------------------------------------------------- 链接识别
 
@@ -133,6 +182,12 @@ _CODEC_PRIORITY: Dict[int, int] = {7: 0, 12: 1, 13: 2, 14: 3}
 #: ffmpeg 可执行文件路径。留空则用 PATH 里的 ffmpeg（Docker 镜像里是 apt 装的）。
 FFMPEG_BIN = os.environ.get("FFMPEG_BIN", "").strip()
 
+#: ffmpeg 可用性探测缓存：``(路径或 None, 探测时刻)``，见 ``ffmpeg_path``。
+_ffmpeg_cache: Optional[tuple] = None
+
+#: 探测结果缓存时长（秒）。不能永久缓存——用户可能在服务运行期间才装上 ffmpeg。
+_FFMPEG_TTL = 600.0
+
 _VIEW_ERRORS = {
     -400: "请求参数有误，请确认链接是否完整",
     -403: "访问权限不足，无法解析该视频",
@@ -153,6 +208,31 @@ def _host_of(url: str) -> str:
         return (urlparse(url).hostname or "").lower()
     except Exception:
         return ""
+
+
+#: B 站自家 CDN 的域名关键字。用于给直链排序，见 ``prefer_official_cdn``。
+_OFFICIAL_CDN_KEYS = ("bilivideo", "hdslb", "bilibili", "akamaized.net", "upos")
+
+
+def prefer_official_cdn(urls: List[str]) -> List[str]:
+    """把 B 站官方 CDN 的地址排到前面，PCDN / 未知域名垫后。
+
+    ``playurl`` 返回的 ``url`` 有时是**第三方 PCDN 边缘节点**
+    （实测形如 ``809aj93l.edge.mountaintoys.cn:4483``），``backup_url`` 里才放着
+    ``upos-*.bilivideo.com`` 这类官方 CDN。而前端只会拿列表里的**第一个**地址去
+    请求 ``/api/download``，那个接口带域名白名单（防止被当开放代理），PCDN 域名
+    不在白名单里 —— 用户看到的现象就是「解析成功，一点下载就 400」。
+
+    排序后官方 CDN 优先：既绕开白名单问题，稳定性也明显更好（PCDN 节点抖动大）。
+    其余地址原样保留在末尾，作为服务端合并下载时的兜底。
+
+    用稳定排序，同档位不改变接口给出的原始优先级。
+    """
+    def rank(u: str) -> int:
+        host = _host_of(u)
+        return 0 if any(k in host for k in _OFFICIAL_CDN_KEYS) else 1
+
+    return sorted([u for u in urls if u], key=rank)
 
 
 def is_bilibili_link(url: str) -> bool:
@@ -280,17 +360,43 @@ def _fmt_duration(secs: int) -> str:
 _client: Optional[httpx.AsyncClient] = None
 
 
-def _headers(cookie: str = "") -> Dict[str, str]:
-    """构造请求头。``Referer`` 对 B 站 CDN 是必需的防盗链字段。
+def _browser_headers(referer: str = "") -> Dict[str, str]:
+    """构造「长得像真实 Chrome」的请求头。
 
-    :param cookie: 访客**会话级**凭据（扫码登录得到）。传了就用它，否则回落到
-                   ``.env`` 里的全局 ``BILI_COOKIE``。
+    风控会拿请求头跟真实浏览器逐项比对。只给 ``UA + Referer`` 的请求即使内容
+    完全合法也可能被判成脚本（HTTP 412），所以这里把 Chrome 首屏会带的那几组
+    头补齐：``Accept`` / ``Origin`` / ``sec-ch-ua`` / ``sec-fetch-*``。
+
+    :param referer: 传具体视频页（``https://www.bilibili.com/video/BV…/``）比只给
+                    站点首页更"真"，风控宽松时单靠它就能过。留空则用首页。
     """
-    h = {
+    return {
         "User-Agent": PC_UA,
-        "Referer": "https://www.bilibili.com/",
-        "Accept-Language": "zh-CN,zh;q=0.9",
+        "Accept": "*/*",
+        "Accept-Language": "zh-CN,zh;q=0.9,en;q=0.8",
+        "Referer": referer or _HOME_URL,
+        "Origin": "https://www.bilibili.com",
+        "sec-ch-ua": '"Chromium";v="124", "Google Chrome";v="124", "Not-A.Brand";v="99"',
+        "sec-ch-ua-mobile": "?0",
+        "sec-ch-ua-platform": '"Windows"',
+        "Sec-Fetch-Dest": "empty",
+        "Sec-Fetch-Mode": "cors",
+        "Sec-Fetch-Site": "same-site",
     }
+
+
+def video_referer(bvid: str = "") -> str:
+    """该视频页地址；没有 BV 号时退回站点首页。"""
+    return f"https://www.bilibili.com/video/{bvid}/" if bvid else _HOME_URL
+
+
+def _headers(cookie: str = "", referer: str = "") -> Dict[str, str]:
+    """**同步版**请求头，仅供共享客户端初始化与 CDN 下载使用。
+
+    这里不含设备指纹——指纹要异步抓取并缓存，见 ``request_cookie``。需要指纹的
+    接口调用请走 ``_api_get``，它会自己补上。
+    """
+    h = _browser_headers(referer)
     effective = resolve_cookie(cookie)
     if effective:
         h["Cookie"] = effective
@@ -298,13 +404,160 @@ def _headers(cookie: str = "") -> Dict[str, str]:
 
 
 def resolve_cookie(session_cookie: str = "") -> str:
-    """决定这次请求用哪个凭据。
+    """决定这次请求用哪个**账号凭据**。
 
     优先级：**会话级（访客自己扫码登录的）> 全局（``.env`` 里配的）**。
     这样即使服务器配了统一的账号，某个访客用自己的账号登录后也能立刻
     用上自己账号的权益（比如大会员），而不会互相串号。
+
+    注意这里只管账号凭据，设备指纹是另一回事，见 ``request_cookie``。
     """
     return (session_cookie or "").strip() or BILI_COOKIE
+
+
+# ---------------------------------------------------------------- 设备指纹
+
+#: 指纹缓存与并发去重锁
+_fp_lock = asyncio.Lock()
+_fp_cookie: str = ""
+_fp_at: float = 0.0
+
+
+def _random_buvid3() -> str:
+    """按 B 站真实格式造一个 buvid3。
+
+    真实值形如 ``BCE1BF7A-A9B2-2BA8-80BA-80EAD87E672362661infoc``，即
+    「32 位十六进制 UUID + 若干数字 + ``infoc`` 后缀」。只有在首页都拿不到指纹
+    时（典型就是 IP 已被风控）才会走到这里——一个格式合法的随机值比"完全不带
+    这个 Cookie"更容易过检，失败也只会退化成原来的报错，没有副作用。
+    """
+    hx = "0123456789ABCDEF"
+    u = "".join(secrets.choice(hx) for _ in range(32))
+    tail = "".join(secrets.choice("0123456789") for _ in range(5))
+    return f"{u[:8]}-{u[8:12]}-{u[12:16]}-{u[16:20]}-{u[20:]}{tail}infoc"
+
+
+async def _fetch_fingerprint() -> str:
+    """抓一套设备指纹 Cookie（``buvid3`` / ``buvid4`` / ``b_nut``）。
+
+    两个来源互补，缺一不可：
+
+    * **站点首页的 ``Set-Cookie``**——真实浏览器首次访问时边缘节点就会种下
+      ``buvid3`` 与 ``b_nut``（首次访问时间戳）。拿到 ``b_nut`` 只有这一条路径，
+      而它正是"这个请求来自一个真实访客"最直接的证据。
+    * **``x/frontend/finger/spi``**——补 ``buvid4``。新版风控会校验它，只带
+      ``buvid3`` 的请求在新策略下有一定概率被拦。
+
+    每一步都「尽力而为」：失败就少几个字段，绝不在这里抛错。真的连不通，
+    后续业务接口给出的错误更准确、更有指导性。
+    """
+    pairs: Dict[str, str] = {}
+    h = _browser_headers()
+    timeout = httpx.Timeout(10, read=20)
+
+    try:
+        async with httpx.AsyncClient(headers=h, timeout=timeout,
+                                     follow_redirects=True) as c:
+            await c.get(_HOME_URL)
+            for k, v in c.cookies.items():
+                pairs[k] = v
+    except httpx.HTTPError:
+        pass
+
+    try:
+        async with httpx.AsyncClient(headers=h, timeout=timeout,
+                                     follow_redirects=True) as c:
+            r = await c.get(_FINGER_API)
+        if r.status_code == 200:
+            data = (r.json() or {}).get("data") or {}
+            # 首页已给的 buvid3 优先保留（两者等价，但首页那套跟 b_nut 是配套的）
+            if data.get("b_3"):
+                pairs.setdefault("buvid3", str(data["b_3"]))
+            if data.get("b_4"):
+                pairs["buvid4"] = str(data["b_4"])
+    except (httpx.HTTPError, ValueError):
+        pass
+
+    # ``b_nut`` 就是「首次访问时间」，缺了按当前时间补一个（秒级时间戳）
+    pairs.setdefault("b_nut", str(int(time.time())))
+    pairs.setdefault("buvid3", _random_buvid3())
+    return "; ".join(f"{k}={v}" for k, v in pairs.items() if v)
+
+
+async def fingerprint() -> str:
+    """取当前设备指纹（带缓存 + 并发去重）。
+
+    首次调用会真的发两次请求（首页 + finger），之后 6 小时内零成本复用。
+    """
+    global _fp_cookie, _fp_at
+    if _fp_cookie and (time.time() - _fp_at) < _FP_TTL:
+        return _fp_cookie
+    async with _fp_lock:
+        if _fp_cookie and (time.time() - _fp_at) < _FP_TTL:   # 等锁期间可能已被刷新
+            return _fp_cookie
+        _fp_cookie = await _fetch_fingerprint()
+        _fp_at = time.time()
+    return _fp_cookie
+
+
+async def reset_fingerprint() -> str:
+    """丢弃缓存并重新抓一套指纹（命中 412 后调用，等价于"换台设备"）。"""
+    global _fp_cookie, _fp_at
+    async with _fp_lock:
+        _fp_cookie = ""
+        _fp_at = 0.0
+    return await fingerprint()
+
+
+def merge_cookie(fp: str, account: str) -> str:
+    """把设备指纹与账号凭据合成一个 Cookie 串。
+
+    **账号优先**：同名键（账号自己也会带 ``buvid3``）保留账号的值。否则换指纹会
+    让登录态和新设备对不上，反而更容易被判为异常。指纹只负责补账号没有的键。
+    """
+    out: Dict[str, str] = {}
+    for src in (fp, account):
+        for item in (src or "").split(";"):
+            item = item.strip()
+            if not item or "=" not in item:
+                continue
+            k, v = item.split("=", 1)
+            k, v = k.strip(), v.strip()
+            if k and v:
+                out[k] = v
+    return "; ".join(f"{k}={v}" for k, v in out.items())
+
+
+async def request_cookie(session_cookie: str = "") -> str:
+    """本次请求实际要带的 Cookie = **设备指纹 + 账号凭据**（账号优先）。
+
+    这是防 412 的第一道也是最重要的一道防线：未登录用户也必须有指纹，
+    否则 B 站会直接把请求判成脚本。
+    """
+    return merge_cookie(await fingerprint(), resolve_cookie(session_cookie))
+
+
+# ---------------------------------------------------------------- 请求节流
+
+_throttle_lock = asyncio.Lock()
+_last_call: float = 0.0
+
+
+async def _throttle() -> None:
+    """给 B 站接口请求套一个全局最小间隔。
+
+    一次解析要连发近十个请求（view + 逐档 playurl + dash）。机房 IP 上这种
+    「零间隔连发」是触发风控的主要原因之一，串行摊平后代价只有几百毫秒。
+    间隔可用 ``BILI_MIN_INTERVAL`` 调整，设 0 关闭。
+    """
+    global _last_call
+    if _MIN_INTERVAL <= 0:
+        return
+    async with _throttle_lock:
+        wait = _MIN_INTERVAL - (time.monotonic() - _last_call)
+        if wait > 0:
+            await asyncio.sleep(wait)
+        _last_call = time.monotonic()
 
 
 async def startup() -> None:
@@ -329,21 +582,52 @@ def _ensure_client() -> httpx.AsyncClient:
     return _client
 
 
-async def _api_get(api: str, params: Dict[str, Any], cookie: str = "") -> Dict[str, Any]:
-    """调用 B 站接口并返回 JSON（不含业务错误判断）。"""
+async def _api_get(api: str, params: Dict[str, Any], cookie: str = "",
+                   referer: str = "") -> Dict[str, Any]:
+    """调用 B 站接口并返回 JSON（不含业务错误判断）。
+
+    这里集中处理两件与风控相关的事，调用方无需关心：
+
+    1. **总是带设备指纹**——哪怕用户没登录。不带 ``buvid3`` 的裸请求是这个项目
+       线上被 412 拦掉的头号原因。
+    2. **412 自动换指纹重试**——命中风控说明当前这套指纹被盯上了，换一套新的
+       （等价于"换台设备"）通常立刻恢复。重试仍失败才把错误交给用户。
+    """
     client = _ensure_client()
-    effective = resolve_cookie(cookie)
-    try:
-        # 逐请求覆盖 Cookie：会话级凭据优先于客户端默认的全局凭据
-        r = await client.get(api, params=params, headers={"Cookie": effective} if effective else None)
-    except httpx.HTTPError as e:
-        raise ParseError("无法连接哔哩哔哩服务器，请检查网络后重试") from e
-    if r.status_code != 200:
-        raise ParseError(f"哔哩哔哩接口返回 HTTP {r.status_code}，请稍后重试")
-    try:
-        return r.json()
-    except ValueError as e:
-        raise ParseError("哔哩哔哩接口返回内容异常，请稍后重试") from e
+    headers = _browser_headers(referer)
+    headers["Cookie"] = await request_cookie(cookie)
+
+    last_status = 0
+    for attempt in range(_RETRY_412 + 1):
+        await _throttle()
+        try:
+            r = await client.get(api, params=params, headers=headers)
+        except httpx.HTTPError as e:
+            raise ParseError("无法连接哔哩哔哩服务器，请检查网络后重试") from e
+
+        last_status = r.status_code
+        if last_status == 200:
+            try:
+                return r.json()
+            except ValueError as e:
+                raise ParseError("哔哩哔哩接口返回内容异常，请稍后重试") from e
+
+        if last_status != 412:
+            break                                   # 其它状态码重试也没意义
+
+        if attempt < _RETRY_412:
+            await asyncio.sleep(0.5 * (attempt + 1))    # 退避，别把风控喂饱
+            await reset_fingerprint()
+            headers["Cookie"] = await request_cookie(cookie)
+
+    if last_status == 412:
+        raise ParseError(
+            "哔哩哔哩触发了风控校验（HTTP 412），已自动更换设备指纹重试仍未通过。"
+            "通常是服务器出口 IP 被 B 站限制，或短时间内解析过于频繁。请稍后重试；"
+            "若持续出现，建议在服务器上配置 BILI_COOKIE（带登录态能显著提升请求信誉度），"
+            "或更换服务器出口 IP。"
+        )
+    raise ParseError(f"哔哩哔哩接口返回 HTTP {last_status}，请稍后重试")
 
 
 # ---------------------------------------------------------------- 分P 与画质
@@ -352,7 +636,8 @@ async def _fetch_view(bvid: Optional[str] = None, aid: Optional[int] = None,
                       cookie: str = "") -> Dict[str, Any]:
     """获取稿件元信息。"""
     params: Dict[str, Any] = {"bvid": bvid} if bvid else {"aid": aid}
-    body = await _api_get(_VIEW_API, params, cookie)
+    # Referer 精确到视频页，风控判定时比站点首页更宽松
+    body = await _api_get(_VIEW_API, params, cookie, referer=video_referer(bvid or ""))
     code = int(body.get("code") or 0)
     if code != 0:
         raise ParseError(
@@ -373,6 +658,7 @@ async def _playurl(bvid: str, cid: int, qn: int, cookie: str = "") -> Optional[D
         _PLAYURL_API,
         {"bvid": bvid, "cid": cid, "qn": qn, "fnval": 1, "fnver": 0, "fourk": 1},
         cookie,
+        referer=video_referer(bvid),
     )
     if int(body.get("code") or 0) != 0:
         return None
@@ -413,38 +699,76 @@ async def _collect_qualities(bvid: str, cid: int, cookie: str = "") -> List[Dict
 
     传入登录凭据后，同一段代码会自动解锁更高档位——因为「哪些档位真的能拿到」
     完全由接口的返回决定，不需要为登录态单独写分支。
+
+    **跳档优化（重要）**：接口被降级时会告诉我们"实际给到了哪一档"。比如拿
+    qn=120 去问、返回 ``quality=64``，说明 (64, 120] 这一整段账号都拿不到，
+    中间那些档位再问一遍纯属浪费——而每多一次请求就多一分被风控拦的风险。
+    所以这里在降级时直接跳到「返回档位之下的第一档」继续问。
+
+    未登录用户的实际请求数因此从 7 次降到 3 次（120→64、32、16），
+    既省时间也显著降低了 412 概率。
     """
     tiers: Dict[int, Dict[str, Any]] = {}
+    asked: set = set()                      # 已经发过请求的档位，避免重复问
 
-    first = await _playurl(bvid, cid, _QN_CANDIDATES[0], cookie)
+    first_qn = _QN_CANDIDATES[0]
+    first = await _playurl(bvid, cid, first_qn, cookie)
     if first is None:
         raise ParseError(
             "该视频未提供可直接下载的完整视频流，可能是付费内容、会员专属或受版权保护"
         )
+    asked.add(first_qn)
     q0 = int(first.get("quality") or 0)
     if q0:
         tiers[q0] = first
 
-    candidates = [int(q) for q in (first.get("accept_quality") or []) if int(q or 0) > 0]
-    candidates = [q for q in candidates if q not in tiers]
-    candidates.sort(reverse=True)
+    candidates = sorted(
+        {int(q) for q in (first.get("accept_quality") or []) if int(q or 0) > 0},
+        reverse=True,
+    )
+
+    def next_below(value: int) -> int:
+        """候选表里第一个**低于** ``value`` 的下标（没有则返回末尾）。
+
+        接口把请求从 q 降到 v，等于告诉我们 (v, q] 这一段账号全拿不到，
+        下一次请求直接从 v 之下起手——中间那些档位问也是白问，
+        而每多一次请求就多一分被风控拦的风险。
+        """
+        for k, c in enumerate(candidates):
+            if c < value:
+                return k
+        return len(candidates)
 
     calls = 1
-    for qn in candidates:
-        if calls >= _MAX_PLAYURL_CALLS:
-            break
+    # 首探通常直接问最高档（120）。若被降级到 q0，同样说明 (q0, 120] 拿不到，
+    # 起手位置就该跳到 q0 之下，而不是从候选表头部一个个试。
+    i = next_below(q0) if (q0 and q0 < first_qn) else 0
+    while i < len(candidates) and calls < _MAX_PLAYURL_CALLS:
+        qn = candidates[i]
+        # ``asked`` 挡住首次探顶那个档位（探 120 被降到 64 时，120 并不在 tiers 里，
+        # 不挡就会再问一次 120，纯属白打请求）；``tiers`` 挡住已被降级顺带拿到的档位。
+        if qn in asked or qn in tiers:
+            i += 1
+            continue
         calls += 1
+        asked.add(qn)
         payload = await _playurl(bvid, cid, qn, cookie)
-        if payload is None:
+        if payload is None:                 # 这一档彻底不可用，继续看下一档
+            i += 1
             continue
         got = int(payload.get("quality") or 0)
-        if got and got not in tiers:
-            tiers[got] = payload
+        if got:
+            tiers.setdefault(got, payload)
+        # 如愿拿到（或档位未知）就正常往下走；被降级则跳过中间必然失败的档位
+        i = i + 1 if (not got or got >= qn) else next_below(got)
 
     qualities: List[Dict[str, Any]] = []
     for qn, payload in tiers.items():
         durl0 = (payload.get("durl") or [{}])[0]
         label, note = _quality_label(qn, payload)
+        # 主地址 + 备用地址一起给出，并把官方 CDN 排到第一位——前端只取第一个，
+        # 而 /api/download 有域名白名单，PCDN 节点排前面会直接 400（见 prefer_official_cdn）
+        urls = prefer_official_cdn([durl0.get("url")] + list(durl0.get("backup_url") or []))
         qualities.append({
             "key": f"qn{qn}",
             "qn": qn,
@@ -455,7 +779,7 @@ async def _collect_qualities(bvid: str, cid: int, cookie: str = "") -> List[Dict
             "size_bytes": durl0.get("size"),
             "size_text": _fmt_size(durl0.get("size")),
             "codec": "MP4",
-            "urls": [durl0["url"]],
+            "urls": urls,
             "duration_ms": int(durl0.get("length") or 0),
             "format": "mp4",     # 可直接下载，无需合并
             "needs_merge": False,
@@ -500,15 +824,57 @@ def merge_formats(mp4: List[Dict[str, Any]],
 
 # ---------------------------------------------------------------- DASH
 
+def _ffmpeg_runs(path: str) -> bool:
+    """真的执行一次 ``ffmpeg -version``，确认这个路径**跑得起来**。
+
+    只判断「文件是否存在」是不够的。实测（Windows + WinGet 安装的 ffmpeg）：
+    ``WinGet\\Links`` 目录下会留下一个 **0 字节的 reparse point**，
+    ``shutil.which()`` 能找到它、``Path.exists()`` 也是 True，
+    但真正执行会抛 ``OSError [WinError 193] 不是有效的 Win32 应用程序``。
+
+    这类「占着名字却跑不起来」的情况若漏过检测，用户就会看到 DASH 档位、
+    点下去、等上十几秒，最后拿到一个报错——正是 ``dash_supported`` 要避免的。
+    """
+    try:
+        r = subprocess.run(
+            [path, "-version"],
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=15,
+        )
+        return r.returncode == 0
+    except (OSError, subprocess.SubprocessError):
+        return False
+
+
 def ffmpeg_path() -> Optional[str]:
-    """返回可用的 ffmpeg 路径；没装则返回 ``None``。
+    """返回**确认可执行**的 ffmpeg 路径；没有则返回 ``None``。
 
     合并 DASH 音视频必须依赖 ffmpeg。没装时不应该把 DASH 档位列给用户
     （否则点了必然失败），所以前端展示要以此为准（见 ``dash_supported``）。
+
+    这里刻意做**真实执行探测**而非单纯的存在性检查，原因见 ``_ffmpeg_runs``。
+    探测会起一个子进程（约几十毫秒），因此结果按 ``_FFMPEG_TTL`` 缓存；
+    不能永久缓存——用户可能在服务运行期间才装上 ffmpeg。
     """
-    if FFMPEG_BIN and Path(FFMPEG_BIN).exists():
-        return FFMPEG_BIN
-    return shutil.which("ffmpeg")
+    global _ffmpeg_cache
+    now = time.monotonic()
+    if _ffmpeg_cache and (now - _ffmpeg_cache[1]) < _FFMPEG_TTL:
+        return _ffmpeg_cache[0]
+
+    candidates: List[str] = []
+    if FFMPEG_BIN:
+        candidates.append(FFMPEG_BIN)            # 显式配置优先，方便覆盖 PATH 里的坏路径
+    found = shutil.which("ffmpeg")
+    if found and found not in candidates:
+        candidates.append(found)
+
+    path = next((c for c in candidates if Path(c).exists() and _ffmpeg_runs(c)), None)
+    _ffmpeg_cache = (path, now)
+    if path is None and candidates:
+        # 找到了名字却跑不起来，这是最容易让人困惑的情形，值得留下日志线索
+        print(f"[bilibili] 检测到 ffmpeg 候选 {candidates} 但均无法执行，"
+              f"DASH 高清档位将不展示。可用 FFMPEG_BIN 指定正确的可执行文件路径。",
+              file=sys.stderr)
+    return path
 
 
 def dash_supported() -> bool:
@@ -517,10 +883,11 @@ def dash_supported() -> bool:
 
 
 def _stream_urls(s: Dict[str, Any]) -> List[str]:
-    """取一条流的所有可用地址（主地址 + 备用 CDN）。
+    """取一条流的可用地址（主地址 + 备用 CDN），官方 CDN 排在前面。
 
     新接口用 ``baseUrl`` / ``backupUrl``，老接口用 ``base_url`` / ``backup_url``，
-    两种都要兼容。
+    两种都要兼容。排序原因见 ``prefer_official_cdn``——同一份返回里主地址可能
+    落在第三方 PCDN 节点上，服务端逐条尝试时先打官方 CDN 成功率高得多。
     """
     urls: List[str] = []
     for k in ("baseUrl", "base_url"):
@@ -530,7 +897,7 @@ def _stream_urls(s: Dict[str, Any]) -> List[str]:
         for u in (s.get(k) or []):
             if u:
                 urls.append(str(u))
-    return urls
+    return prefer_official_cdn(urls)
 
 
 def _pick_audio(dash: Dict[str, Any]) -> Optional[Dict[str, Any]]:
@@ -577,7 +944,7 @@ async def fetch_dash(bvid: str, cid: int, cookie: str = "") -> Optional[Dict[str
     body = await _api_get(_PLAYURL_API, {
         "bvid": bvid, "cid": cid, "qn": _QN_CANDIDATES[0],
         "fnval": _DASH_FNVAL, "fnver": 0, "fourk": 1,
-    }, cookie)
+    }, cookie, referer=video_referer(bvid))
     if int(body.get("code") or 0) != 0:
         return None
     data = body.get("data")
@@ -645,7 +1012,11 @@ async def _download_stream(urls: List[str], dest: Path, cookie: str = "") -> Non
     if not urls:
         raise ParseError("视频流地址为空")
     client = _ensure_client()
-    headers = _headers(cookie)                       # CDN 同样校验 Referer
+    # CDN 校验防盗链只看 Referer，但带上设备指纹更接近真实播放器的请求
+    headers = _browser_headers()
+    jar = await request_cookie(cookie)
+    if jar:
+        headers["Cookie"] = jar
     last = "未知错误"
     for u in urls:
         try:
@@ -786,6 +1157,10 @@ async def debug_qualities(raw: str, page: Optional[int] = None,
     cid = int(cur.get("cid") or meta.get("cid") or 0)
 
     session_cookie = (cookie or "").strip()
+    # 把设备指纹的状态也报出来：排查 412 时，第一件要确认的就是「指纹到底拿到没有」。
+    # 只回报键名与长度，不回明文（虽然指纹本身不敏感，但没必要外传）。
+    fp = await fingerprint()
+    fp_keys = [kv.split("=", 1)[0].strip() for kv in fp.split(";") if "=" in kv]
     out: Dict[str, Any] = {
         "bvid": bvid,
         "cid": cid,
@@ -793,6 +1168,14 @@ async def debug_qualities(raw: str, page: Optional[int] = None,
         "duration_sec": int(cur.get("duration") or meta.get("duration") or 0),
         "cookie_source": "session(访客扫码)" if session_cookie else ("env(BILI_COOKIE)" if BILI_COOKIE else "none(未登录)"),
         "cookie_len": len(resolve_cookie(cookie)),
+        "fingerprint": {
+            "keys": fp_keys,
+            "has_buvid3": "buvid3" in fp_keys,
+            "has_buvid4": "buvid4" in fp_keys,
+            "has_b_nut": "b_nut" in fp_keys,
+            "cached_at": int(_fp_at),
+            "ttl": int(_FP_TTL),
+        },
         "nav": await fetch_nav(cookie),
         "mp4_probe": [],
     }
@@ -803,7 +1186,7 @@ async def debug_qualities(raw: str, page: Optional[int] = None,
             body = await _api_get(_PLAYURL_API, {
                 "bvid": bvid, "cid": cid, "qn": qn,
                 "fnval": 1, "fnver": 0, "fourk": 1,
-            }, cookie)
+            }, cookie, referer=video_referer(bvid))
         except ParseError as e:
             out["mp4_probe"].append({"ask": qn, "error": str(e)})
             continue
@@ -823,7 +1206,7 @@ async def debug_qualities(raw: str, page: Optional[int] = None,
         body = await _api_get(_PLAYURL_API, {
             "bvid": bvid, "cid": cid, "qn": 127,
             "fnval": 4048, "fnver": 0, "fourk": 1,
-        }, cookie)
+        }, cookie, referer=video_referer(bvid))
         data = body.get("data") if isinstance(body.get("data"), dict) else {}
         dash = data.get("dash") or {}
         vids = dash.get("video") or []

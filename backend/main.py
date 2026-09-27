@@ -345,9 +345,29 @@ async def api_download(
     url: str = Query(..., description="视频直链（来自解析结果）"),
     filename: str = Query("video.mp4", description="保存文件名"),
 ):
+    """代理流式下载（绕过 Referer 防盗链 + 触发浏览器保存）。
+
+    只放通两个平台的 CDN 域名，避免这个接口被当成开放代理滥用。注意 B 站会把
+    部分直链下发到**第三方 PCDN 节点**，那些域名刻意不在白名单里——正常路径下
+    ``bilibili.prefer_official_cdn`` 已经把官方 CDN 排到第一位，前端取的就是它；
+    真走到这里报 400，基本只有两种可能：平台换了 CDN 域名，或该视频没给官方地址。
+    """
     platform = _platform_of_host(url)
     if platform is None:
-        raise HTTPException(status_code=400, detail="仅支持抖音 / 哔哩哔哩 视频直链下载")
+        host = ""
+        try:
+            host = httpx.URL(url).host
+        except Exception:
+            pass
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                f"直链域名 {host or '（无法解析）'} 不在下载白名单内。"
+                "若平台更换了 CDN 域名，请在 .env 的 EXTRA_BILIBILI_HOSTS / "
+                "EXTRA_DOUYIN_HOSTS 里追加域名关键字。B 站第三方 PCDN 节点地址"
+                "默认不放通（防止本接口被当成开放代理滥用），请重新解析获取官方 CDN 直链。"
+            ),
+        )
 
     client = httpx.AsyncClient(
         headers=_DL_HEADERS[platform],
