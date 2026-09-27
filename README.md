@@ -49,6 +49,7 @@ douyin-downloader/
 │   ├── nginx-https.conf     # Nginx 反向代理（HTTPS 版模板）
 │   ├── douyin-downloader.service  # 裸机部署的 systemd 服务
 │   └── certs/               # HTTPS 证书存放目录（gitignore）
+├── run-local.sh             # 本地开发启动脚本（自动挑 Python 与 ffmpeg，规避 WinGet 坏 shim）
 ├── .env.example             # 环境变量模板
 ├── docker-compose.yml       # 容器编排（web + 可选 nginx）
 ├── .gitignore
@@ -58,6 +59,21 @@ douyin-downloader/
 ## 快速开始
 
 ### 方式一：本地运行
+
+**最省事：用自带的启动脚本**（自动挑 Python 与 ffmpeg，见下方说明）
+
+```bash
+bash run-local.sh
+# 换端口：PORT=9000 bash run-local.sh
+```
+
+脚本只做三件事，都是本地开发最容易卡住的地方：
+
+1. **挑 Python** —— 按 `.venv/` → 托管环境 → 系统 Python 的顺序，找**第一个真能 `import fastapi, uvicorn, httpx`** 的；
+2. **挑 ffmpeg** —— 关键在它会**用 Python 真实执行** `ffmpeg -version` 来验证（原因见下）；
+3. 起 `uvicorn`。
+
+**手动跑也可以**（等价做法）：
 
 ```bash
 pip install -r backend/requirements.txt
@@ -77,6 +93,29 @@ uvicorn main:app --host 0.0.0.0 --port 8000
 > ```
 >
 > 装在非标准路径时用 `FFMPEG_BIN=/path/to/ffmpeg` 指定即可。
+
+#### ⚠️ 本地跑最容易踩的坑：ffmpeg 的「假可用」
+
+Windows 上用 **WinGet** 装的 ffmpeg，`PATH` 里那个 `ffmpeg.exe` 是一个
+**0 字节的 reparse point（shim）**，真身在 `WinGet\Packages\Gyan.FFmpeg_*\...\bin\` 下。
+它的坏处是**看起来一切正常，直到用户点了高清档位才失败**：
+
+| 检查方式 | 结果 | 说明 |
+|---|---|---|
+| `Path.exists()` | ✅ 通过 | 文件确实在 |
+| `shutil.which()` | ✅ 通过 | 找得到 |
+| Python `subprocess` 执行 | ❌ `[WinError 193]` | **应用实际走的路径，会失败** |
+| Git Bash 直接执行 | ✅ 通过 | bash 会跟随 reparse point |
+
+最后两行的差异是重点：**bash 能跑不代表应用能跑**。所以 `run-local.sh` 用 `$PY`（应用实际使用的解释器）去验证 ffmpeg，而不是用 bash 的 `-version`——否则会把坏路径当成可用的选出来。
+
+`backend/bilibili.py` 里的 `ffmpeg_path()` 也做了同样的真实执行探测，所以**手动启动时**选到坏路径的表现是：DASH 档位直接不出现（正确行为），日志里会有一行 `[bilibili] 检测到 ffmpeg 候选 ... 但均无法执行`。
+
+想用上 ffmpeg，在 `.env` 里指向真身即可：
+
+```ini
+FFMPEG_BIN=C:/Users/你/AppData/Local/Microsoft/WinGet/Packages/Gyan.FFmpeg_xxx/ffmpeg-9.0.2-full_build/bin/ffmpeg.exe
+```
 
 ### 方式二：Docker 一键部署
 
