@@ -1,0 +1,62 @@
+services:
+  web:
+    build:
+      context: ./backend
+      args:
+        # 网络受限时的兜底通道：可指向国内镜像源的基础镜像
+        # 例：BASE_IMAGE=docker.m.daocloud.io/library/python:3.12-slim
+        BASE_IMAGE: "${BASE_IMAGE:-python:3.12-slim}"
+        PIP_INDEX_URL: "${PIP_INDEX_URL:-}"
+        # 备用 pip 源：主源临时缺包/限流时兜底，避免单个镜像站抖动弄挂构建
+        PIP_EXTRA_INDEX_URL: "${PIP_EXTRA_INDEX_URL:-}"
+        # 装 ffmpeg 用的 Debian 源。默认清华源；若该源不可用可换成
+        # mirrors.aliyun.com 等（改 .env 即可，无需改 Dockerfile）。
+        APT_MIRROR: "${APT_MIRROR:-mirrors.tuna.tsinghua.edu.cn}"
+    image: douyin-downloader:latest
+    container_name: douyin-downloader
+    restart: unless-stopped
+    environment:
+      TZ: Asia/Shanghai
+      # 抖音解析引擎。推荐自托管（见 README「上线部署」）；
+      # 留空/保持默认则使用公共实例 api.douyin.wtf（demo 账号有限流，仅适合自用）
+      DTK_BASE_URL: "${DTK_BASE_URL:-https://api.douyin.wtf}"
+      DTK_USERNAME: "${DTK_USERNAME:-demo}"
+      DTK_PASSWORD: "${DTK_PASSWORD:-kelp-kelp-delta-3690}"
+      # 哔哩哔哩：留空即可（网页上可扫码登录，凭据按浏览器会话隔离存内存）；
+      # 填 Cookie 则作为服务端统一账号兜底，访客自己的扫码登录优先于它
+      BILI_COOKIE: "${BILI_COOKIE:-}"
+      # 下载域名白名单的额外放通项（一般无需配置）
+      EXTRA_DOUYIN_HOSTS: "${EXTRA_DOUYIN_HOSTS:-}"
+      EXTRA_BILIBILI_HOSTS: "${EXTRA_BILIBILI_HOSTS:-}"
+      # ffmpeg 路径。镜像里已内置（/usr/bin/ffmpeg）并已在 PATH 中，
+      # 所以留空即自动找到；仅当要覆盖成别的路径时才需要填。
+      FFMPEG_BIN: "${FFMPEG_BIN:-}"
+    ports:
+      # 用 Nginx 时把 APP_BIND 设为 127.0.0.1，只允许本机反代访问，更安全
+      - "${APP_BIND:-0.0.0.0}:${APP_PORT:-8000}:8000"
+    networks: [app]
+
+  # 可选：自带 Nginx 反向代理。启用方式：
+  #   docker compose --profile proxy up -d
+  nginx:
+    image: "${NGINX_IMAGE:-nginx:1.27-alpine}"
+    container_name: douyin-nginx
+    restart: unless-stopped
+    profiles: ["proxy"]
+    depends_on:
+      web:
+        condition: service_healthy
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./deploy/nginx.conf:/etc/nginx/conf.d/default.conf:ro
+      - ./deploy/certs:/etc/nginx/certs:ro
+      - certbot-webroot:/var/www/certbot
+    networks: [app]
+
+volumes:
+  certbot-webroot:
+
+networks:
+  app:

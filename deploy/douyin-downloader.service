@@ -1,0 +1,44 @@
+# 抖音视频下载站 — 裸机（不用 Docker）systemd 服务
+#
+# 用法：
+#   sudo cp deploy/douyin-downloader.service /etc/systemd/system/
+#   sudo systemctl daemon-reload
+#   sudo systemctl enable --now douyin-downloader
+#   sudo systemctl status douyin-downloader
+#
+# 按需修改下面的 用户、路径、监听地址
+
+[Unit]
+Description=Douyin Video Downloader (FastAPI)
+Documentation=https://github.com/Evil0ctal/Douyin_TikTok_Download_API
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=www-data
+Group=www-data
+WorkingDirectory=/opt/douyin-downloader/backend
+
+# 解析引擎配置（推荐改成自托管实例，见 README「上线部署」第 3 步）
+Environment="DTK_BASE_URL=https://api.douyin.wtf"
+Environment="DTK_USERNAME=demo"
+Environment="DTK_PASSWORD=kelp-kelp-delta-3690"
+Environment="PYTHONUNBUFFERED=1"
+
+# 只监听本机，由 Nginx 对外提供服务
+ExecStart=/opt/douyin-downloader/.venv/bin/uvicorn main:app \
+  --host 127.0.0.1 --port 8000 \
+  --proxy-headers --forwarded-allow-ips '*'
+
+Restart=always
+RestartSec=3
+
+# 基本加固
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=full
+ProtectHome=true
+
+[Install]
+WantedBy=multi-user.target

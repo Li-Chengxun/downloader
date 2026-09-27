@@ -1,0 +1,790 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="theme-color" content="#e0f3e6">
+<link rel="icon" href="data:image/svg+xml,<svg xmlns=%22http://www.w3.org/2000/svg%22 viewBox=%220 0 100 100%22><text y=%22.9em%22 font-size=%2290%22>📥</text></svg>">
+<title>抖音 / 哔哩哔哩 视频下载站</title>
+<style>
+  :root{
+    --ink:#253330;
+    --ink-soft:#6d7f78;
+    --line:#ddeee2;
+    --primary:#3bbd7a;
+    --primary-dark:#2e9e63;
+    --bili:#e5739a;
+    --shadow:0 12px 32px rgba(42,150,88,.12);
+  }
+  *{box-sizing:border-box; -webkit-tap-highlight-color:transparent;}
+  html,body{margin:0;padding:0;min-height:100%;
+    font-family:"PingFang SC","Microsoft YaHei","Hiragino Sans GB",system-ui,sans-serif;
+    color:var(--ink);
+    background:linear-gradient(160deg,#e0f3e6 0%,#eef7f0 50%,#e8f4eb 100%);
+  }
+  .wrap{max-width:680px;margin:0 auto;padding:32px 16px 48px;}
+
+  header{text-align:center;margin-bottom:22px;}
+  header h1{margin:0;font-size:26px;font-weight:800;letter-spacing:1px;}
+  header .sub{color:var(--ink-soft);font-size:13px;margin-top:8px;}
+
+  .card{
+    background:#fff;border:1px solid var(--line);border-radius:20px;
+    box-shadow:var(--shadow);padding:20px;margin-bottom:18px;
+  }
+
+  /* 自动识别提示：不需要用户选平台，只在他粘贴链接后告诉他会走哪条通道 */
+  .detect{
+    display:inline-flex;align-items:center;gap:6px;margin:0 0 12px;
+    padding:6px 12px;border-radius:999px;font-size:13px;font-weight:600;
+    background:#eef6ff;border:1px solid #cfe3f7;color:#2f6291;
+  }
+  .detect.bili{background:#fdeef4;border-color:#f7cfdd;color:#a83b6b;}
+  .detect.none{background:#f4f5f4;border-color:var(--line);color:var(--ink-soft);font-weight:500;}
+
+  .input-row{display:flex;gap:10px;}
+  .input-row input{
+    flex:1;padding:12px 14px;font-size:15px;color:var(--ink);
+    border:1.5px solid var(--line);border-radius:12px;background:#f6fbf8;
+    outline:none;transition:border-color .15s, box-shadow .15s, background .15s;font-family:inherit;
+  }
+  .input-row input:focus{border-color:var(--primary);background:#fff;box-shadow:0 0 0 3px rgba(59,189,122,.15);}
+  .btn{
+    padding:12px 22px;font-size:15px;font-weight:700;letter-spacing:1px;color:#fff;
+    background:var(--primary);border:none;border-radius:12px;cursor:pointer;white-space:nowrap;
+    box-shadow:0 6px 16px rgba(59,189,122,.35);transition:background .15s, transform .06s;font-family:inherit;
+  }
+  .btn:hover{background:var(--primary-dark);}
+  .btn:active{transform:scale(.97);}
+  .btn:disabled{opacity:.6;cursor:not-allowed;}
+
+  .error{
+    color:#c0564a;background:#fdf1f0;border:1px solid #f5d9d5;
+    border-radius:10px;padding:10px 12px;font-size:14px;margin-top:12px;
+  }
+  .tip{color:var(--ink-soft);font-size:12px;margin:12px 0 0;line-height:1.7;}
+
+  .cover-wrap{text-align:center;}
+  .cover{
+    max-width:100%;max-height:360px;border-radius:14px;cursor:zoom-in;
+    box-shadow:0 8px 24px rgba(37,51,48,.18);
+  }
+  .title{font-size:17px;line-height:1.7;margin:16px 0 8px;word-break:break-word;}
+  .meta{display:flex;flex-wrap:wrap;gap:6px 16px;color:var(--ink-soft);font-size:13px;margin-bottom:12px;}
+  .badge{
+    display:inline-block;font-size:11px;font-weight:700;color:var(--primary-dark);
+    background:#e7f7ee;border:1px solid #c9ecda;border-radius:6px;
+    padding:1px 6px;vertical-align:2px;
+  }
+  .badge.bili{color:#b5506f;background:#fdeef3;border-color:#f7d5e0;}
+  .summary{
+    background:#f2faf5;border:1px solid #e0f2e7;border-radius:12px;
+    padding:12px 14px;font-size:14px;line-height:1.8;
+  }
+  .card h3{font-size:15px;margin:18px 0 0;}
+
+  /* 分P选集 */
+  .pages{margin-top:14px;}
+  .pages-head{font-size:13px;color:var(--ink-soft);margin-bottom:8px;}
+  .pages-list{display:flex;gap:6px;overflow-x:auto;padding-bottom:6px;}
+  .page-btn{
+    flex:0 0 auto;padding:6px 12px;font-size:13px;font-weight:600;color:var(--ink-soft);
+    background:#f6fbf8;border:1.5px solid var(--line);border-radius:999px;
+    cursor:pointer;transition:all .15s;font-family:inherit;max-width:190px;
+    overflow:hidden;text-overflow:ellipsis;white-space:nowrap;
+  }
+  .page-btn:hover{border-color:#b8e0c8;color:var(--ink);}
+  .page-btn.active{
+    color:#fff;background:var(--primary);border-color:var(--primary);font-weight:700;
+  }
+
+  /* 登录状态条 */
+  .login-bar{
+    display:flex;align-items:center;gap:10px;flex-wrap:wrap;
+    margin-top:16px;padding:11px 13px;border-radius:12px;font-size:13px;
+    background:#fff8f9;border:1px solid #fbe0e8;
+  }
+  .login-bar.on{background:#f0f9f3;border-color:#d4ecd9;}
+  .login-bar .avatar{
+    width:26px;height:26px;border-radius:50%;flex:0 0 auto;
+    border:1.5px solid #fff;box-shadow:0 1px 4px rgba(0,0,0,.12);object-fit:cover;
+  }
+  .login-bar .grow{flex:1;min-width:0;color:#8a6a72;line-height:1.5;}
+  .login-bar.on .grow{color:var(--ink-soft);}
+  .login-bar .who{font-weight:700;color:#b5506f;}
+  .login-bar.on .who{color:var(--primary-dark);}
+  .vip-chip{
+    display:inline-block;font-style:normal;font-size:11px;font-weight:700;
+    color:#8a5a00;background:linear-gradient(135deg,#ffe9a8,#ffd064);
+    border-radius:5px;padding:1px 5px;margin-left:5px;vertical-align:1px;
+  }
+  .mini-btn{
+    flex:0 0 auto;padding:7px 13px;font-size:13px;font-weight:700;cursor:pointer;
+    color:#fff;background:var(--bili);border:none;border-radius:9px;
+    font-family:inherit;transition:filter .15s, transform .06s;
+  }
+  .mini-btn:hover{filter:brightness(1.06);}
+  .mini-btn:active{transform:scale(.97);}
+  .mini-btn.ghost{
+    color:var(--ink-soft);background:#fff;border:1.5px solid var(--line);
+  }
+  .mini-btn.ghost:hover{color:var(--ink);border-color:#c9d8cf;filter:none;}
+  .mini-btn:disabled{opacity:.6;cursor:not-allowed;}
+
+  .diag{
+    margin-top:12px;padding:14px;border:1px solid #e3e9f0;border-radius:12px;
+    background:#fbfcfe;font-size:13px;
+  }
+  .diag-head{display:flex;justify-content:space-between;align-items:center;margin-bottom:8px;}
+  .diag-x{
+    font-size:12px;color:var(--ink-soft);background:none;border:none;
+    cursor:pointer;font-family:inherit;text-decoration:underline;padding:0;
+  }
+  .diag-verdict{margin:0 0 8px;line-height:1.7;color:var(--ink);}
+  .diag-meta{color:var(--ink-soft);font-size:12px;margin-bottom:10px;}
+  .diag-table{width:100%;border-collapse:collapse;font-size:12.5px;}
+  .diag-table th{
+    text-align:left;color:var(--ink-soft);font-weight:600;
+    border-bottom:1px solid #e3e9f0;padding:4px 6px;
+  }
+  .diag-table td{padding:4px 6px;border-bottom:1px solid #f0f3f7;}
+  .diag-table tr:last-child td{border-bottom:none;}
+  .diag-table .muted{color:var(--ink-soft);}
+
+  .qualities{
+    display:grid;grid-template-columns:repeat(auto-fill,minmax(180px,1fr));
+    gap:12px;margin-top:12px;
+  }
+  .q-item{
+    border:1.5px solid var(--line);border-radius:14px;padding:14px;
+    display:flex;flex-direction:column;gap:6px;background:#fff;
+    transition:border-color .15s, box-shadow .15s;
+  }
+  .q-item:hover{box-shadow:0 6px 18px rgba(42,150,88,.14);}
+  .q-item.best{border-color:var(--primary);background:#f2faf5;}
+  /* 「档位名 + 角标」用 flex 排：角标整体成组，放不下时整组换行，
+     既不会把「480P」从中间劈开，也不会让两个角标各自占一行 */
+  .q-label{font-weight:800;font-size:18px;display:flex;align-items:center;flex-wrap:wrap;gap:6px;}
+  .q-name{white-space:nowrap;}
+  .q-tags{display:flex;align-items:center;gap:5px;flex-wrap:wrap;}
+  .q-label i{
+    font-style:normal;font-size:11px;color:#fff;background:var(--primary);
+    border-radius:6px;padding:2px 6px;font-weight:600;white-space:nowrap;
+  }
+  .q-info{color:var(--ink-soft);font-size:12.5px;}
+  .dl{
+    margin-top:auto;text-align:center;background:var(--primary);color:#fff;
+    border-radius:10px;padding:9px;font-size:14px;font-weight:700;text-decoration:none;
+    transition:background .15s;
+  }
+  .dl:hover{background:var(--primary-dark);}
+  /* DASH 档位是音视频分离的，必须服务端合并，用另一种颜色区分下载方式 */
+  .q-label i.tag-merge{background:#3a6ea5;}
+  .dl.dl-merge{background:#3a6ea5;}
+  .dl.dl-merge:hover{background:#2f5b89;}
+  .dl.busy{background:#93a3b3;pointer-events:none;cursor:progress;}
+  .dl-hint{font-size:11.5px;color:var(--ink-soft);text-align:center;line-height:1.4;}
+  .dl-error{
+    margin-top:10px;background:#fdecec;border:1px solid #f5c2c2;color:#a3282c;
+    border-radius:10px;padding:9px 12px;font-size:13px;
+  }
+
+  /* 弹窗：封面预览 / 扫码登录 */
+  .mask{
+    position:fixed;inset:0;background:rgba(0,0,0,.78);
+    display:flex;align-items:center;justify-content:center;
+    z-index:9;padding:20px;
+  }
+  .mask.zoom{cursor:zoom-out;}
+  .mask.zoom img{max-width:94vw;max-height:90vh;border-radius:10px;}
+
+  .qr-box{
+    background:#fff;border-radius:20px;padding:24px 22px 20px;width:100%;max-width:330px;
+    text-align:center;box-shadow:0 20px 50px rgba(0,0,0,.3);
+  }
+  .qr-box h4{margin:0 0 4px;font-size:17px;}
+  .qr-box .qr-sub{color:var(--ink-soft);font-size:12.5px;margin:0 0 16px;}
+  .qr-canvas{
+    position:relative;width:216px;height:216px;margin:0 auto;
+    border:1px solid var(--line);border-radius:14px;padding:8px;background:#fff;
+  }
+  .qr-canvas svg{width:100%;height:100%;display:block;}
+  .qr-veil{
+    position:absolute;inset:0;border-radius:14px;background:rgba(255,255,255,.94);
+    display:flex;flex-direction:column;align-items:center;justify-content:center;
+    gap:10px;padding:12px;text-align:center;
+  }
+  .qr-veil .big{font-size:30px;line-height:1;}
+  .qr-veil .txt{font-size:13px;color:var(--ink-soft);line-height:1.6;}
+  .qr-veil .txt b{color:var(--ink);}
+  .qr-veil.ok .big{color:var(--primary);}
+  .qr-state{
+    margin-top:14px;font-size:13.5px;min-height:20px;line-height:1.5;
+  }
+  .qr-state.waiting{color:var(--ink-soft);}
+  .qr-state.scanned{color:#c08a2e;}
+  .qr-state.success{color:var(--primary-dark);font-weight:700;}
+  .qr-state.expired,.qr-state.error{color:#c0564a;}
+  .qr-actions{display:flex;gap:8px;justify-content:center;margin-top:14px;}
+  .qr-note{
+    margin:16px 0 0;padding-top:12px;border-top:1px solid var(--line);
+    font-size:11.5px;color:var(--ink-soft);line-height:1.7;text-align:left;
+  }
+  .spin{
+    display:inline-block;width:15px;height:15px;border:2px solid #d8ebe0;
+    border-top-color:var(--primary);border-radius:50%;
+    animation:sp .7s linear infinite;vertical-align:-3px;margin-right:6px;
+  }
+  @keyframes sp{to{transform:rotate(360deg);}}
+
+  footer{text-align:center;color:var(--ink-soft);font-size:12px;margin-top:8px;line-height:1.8;}
+
+  @media (max-width:480px){
+    .input-row{flex-direction:column;}
+    .btn{width:100%;}
+    .qualities{grid-template-columns:1fr 1fr;}
+    .login-bar{font-size:12.5px;}
+  }
+</style>
+</head>
+<body>
+<div id="app">
+  <div class="wrap">
+    <header>
+      <h1>📥 视频下载站</h1>
+      <p class="sub">抖音 · 哔哩哔哩 ｜ 粘贴分享链接，自动识别平台，保存原画质视频</p>
+    </header>
+
+    <section class="card">
+      <div class="input-row">
+        <input v-model.trim="url" :placeholder="ph.placeholder" @input="autoDetect" @keyup.enter="parse()">
+        <button class="btn" :disabled="loading" @click="parse()">{{ loading ? '解析中…' : '开始解析' }}</button>
+      </div>
+      <p v-if="detected" class="detect" :class="{ bili: detected === 'bilibili' }">
+        <span>已自动识别：{{ detected === 'bilibili' ? '📺 哔哩哔哩' : '🎵 抖音' }}</span>
+      </p>
+      <p v-else-if="url" class="detect none"><span>未能识别平台，将按抖音尝试解析</span></p>
+      <p v-if="error" class="error">⚠️ {{ error }}</p>
+      <p class="tip">{{ ph.tip }}</p>
+    </section>
+
+    <section v-if="result" class="card">
+      <div class="cover-wrap" v-if="coverSrc">
+        <img :src="coverSrc" class="cover" alt="视频封面" @click="preview = true">
+      </div>
+      <h2 class="title">
+        <span class="badge" :class="{ bili: isBili }">{{ isBili ? '哔哩哔哩' : '抖音' }}</span>
+        {{ result.title }}
+      </h2>
+      <div class="meta">
+        <span>👤 {{ result.author }}</span>
+        <span>⏱ {{ result.duration_text }}</span>
+        <span>🆔 {{ result.video_id }}</span>
+      </div>
+      <div class="summary"><b>内容简介：</b>{{ result.summary }}</div>
+
+      <div class="pages" v-if="result.total_pages > 1">
+        <div class="pages-head">本视频共 {{ result.total_pages }} 个分P，点击切换：</div>
+        <div class="pages-list">
+          <button v-for="pg in result.pages" :key="pg.page" class="page-btn"
+                  :class="{ active: pg.page === result.current_page }"
+                  :title="'P' + pg.page + ' ' + pg.part + ' · ' + pg.duration_text"
+                  @click="selectPage(pg.page)">P{{ pg.page }} · {{ pg.part }}</button>
+        </div>
+      </div>
+
+      <!-- B 站登录状态条 -->
+      <div v-if="isBili" class="login-bar" :class="{ on: login.logged_in }">
+        <img v-if="login.logged_in && login.user.avatar" :src="avatarSrc" class="avatar" alt="">
+        <span class="grow">
+          <template v-if="login.logged_in">
+            已登录：<b class="who">{{ login.user.name }}</b>
+            <em v-if="login.user.vip" class="vip-chip">大会员</em>
+            <template v-if="login.source === 'env'">（服务器统一账号）</template>
+          </template>
+          <template v-else>
+            未登录 · 当前最高 {{ topQuality }}；登录后按账号权益解锁更高画质（1080P 及以上需大会员）
+          </template>
+        </span>
+        <button v-if="login.logged_in && login.can_logout" class="mini-btn ghost" @click="logoutBili">退出</button>
+        <button v-else-if="!login.logged_in" class="mini-btn" :disabled="qr.loading" @click="openQr">
+          {{ qr.loading ? '获取中…' : '扫码登录' }}
+        </button>
+        <button class="mini-btn ghost" :disabled="diag.loading" @click="runDiag">
+          {{ diag.loading ? '诊断中…' : '画质诊断' }}
+        </button>
+      </div>
+      <p v-if="isBili && login.notice" class="tip">⚠️ {{ login.notice }}</p>
+
+      <!-- 画质诊断结果 -->
+      <div v-if="diag.data" class="diag">
+        <div class="diag-head">
+          <b>画质诊断</b>
+          <button class="diag-x" @click="diag.data = null">关闭</button>
+        </div>
+        <p class="diag-verdict">{{ diag.data.verdict }}</p>
+        <div class="diag-meta">
+          凭据：{{ diag.data.cookie_source }} ·
+          账号：{{ diag.data.nav && diag.data.nav.is_login ? diag.data.nav.name : '未登录' }}<template v-if="diag.data.nav && diag.data.nav.is_login"> · {{ diag.data.nav.vip ? '大会员' : '非大会员' }}</template>
+        </div>
+        <table class="diag-table">
+          <thead><tr><th>请求档位</th><th>实际返回</th><th>可下</th></tr></thead>
+          <tbody>
+            <tr v-for="row in diag.rows" :key="row.ask">
+              <td>{{ row.askName }}</td>
+              <td>{{ row.gotName }}</td>
+              <td>{{ row.ok ? '✓ ' + row.size : '—' }}</td>
+            </tr>
+            <tr v-for="row in diag.dashRows" :key="'d' + row.qn">
+              <td class="muted">DASH {{ row.qn }}</td>
+              <td class="muted">{{ row.name }}</td>
+              <td class="muted">音视频分离</td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+
+      <h3>选择清晰度下载</h3>
+      <p class="muted" v-if="mergeCount">
+        其中 {{ mergeCount }} 个高清档位（1080P60 / 4K / HDR 等）原始形态是音视频分离的，
+        由服务器合并后输出完整 MP4，点击后请耐心等待。
+      </p>
+      <div v-if="dlError" class="dl-error">⚠️ {{ dlError }}</div>
+      <div class="qualities">
+        <div v-for="q in result.qualities" :key="q.key" class="q-item" :class="{ best: q.best }">
+          <div class="q-label">
+            <span class="q-name">{{ q.label }}</span>
+            <span class="q-tags" v-if="q.best || q.needs_merge">
+              <i v-if="q.best">最高画质</i><i v-if="q.needs_merge" class="tag-merge">音视频合并</i>
+            </span>
+          </div>
+          <div class="q-info">{{ q.size_text }} · {{ q.codec }}<template v-if="q.note"> · {{ q.note }}</template><template v-if="q.width"> · {{ q.width }}×{{ q.height }}</template></div>
+          <div v-if="q.needs_merge" class="dl-hint">服务器合并音视频，大文件需数十秒</div>
+          <a class="dl" :class="{ 'dl-merge': q.needs_merge, busy: busyKey === q.key }"
+             :href="downloadUrl(q)" @click="onDownload($event, q)">
+            {{ busyKey === q.key ? '⏳ 合并中…' : (q.needs_merge ? '⬇ 合并并下载' : '⬇ 下载视频') }}
+          </a>
+        </div>
+      </div>
+    </section>
+
+    <footer>
+      仅供个人学习与备份使用，请尊重原创作者版权，请勿用于商业用途<br>
+      视频直链具有时效性，下载失败时请重新解析
+    </footer>
+  </div>
+
+  <!-- 封面预览 -->
+  <div v-if="preview" class="mask zoom" @click="preview = false">
+    <img :src="coverSrc" alt="封面大图">
+  </div>
+
+  <!-- 扫码登录 -->
+  <div v-if="qr.visible" class="mask" @click.self="closeQr">
+    <div class="qr-box">
+      <h4>扫码登录哔哩哔哩</h4>
+      <p class="qr-sub">登录后按账号权益解锁更高画质（1080P 及以上需大会员）</p>
+
+      <div class="qr-canvas">
+        <div v-if="qr.svg" v-html="qr.svg"></div>
+
+        <div v-if="qr.status === 'loading'" class="qr-veil">
+          <span class="spin"></span>
+          <div class="txt">正在获取二维码…</div>
+        </div>
+        <div v-else-if="qr.status === 'expired'" class="qr-veil">
+          <div class="big">⏱</div>
+          <div class="txt">二维码已失效<br>请点击下方刷新</div>
+        </div>
+        <div v-else-if="qr.status === 'error'" class="qr-veil">
+          <div class="big">⚠️</div>
+          <div class="txt">二维码获取失败<br>请点击下方重试</div>
+        </div>
+        <div v-else-if="qr.status === 'success'" class="qr-veil ok">
+          <div class="big">✓</div>
+          <div class="txt"><b>登录成功</b><br>正在刷新画质列表…</div>
+        </div>
+        <div v-else-if="!qr.svg" class="qr-veil">
+          <div class="big">⚠️</div>
+          <div class="txt">二维码渲染失败<br>请刷新页面重试</div>
+        </div>
+      </div>
+
+      <div class="qr-state" :class="qr.status">{{ qr.message }}</div>
+
+      <div class="qr-actions">
+        <button v-if="qr.status === 'expired' || qr.status === 'error'"
+                class="mini-btn" @click="openQr">刷新二维码</button>
+        <button v-else class="mini-btn ghost" @click="closeQr">取消</button>
+      </div>
+
+      <p class="qr-note">
+        用<b>哔哩哔哩 App</b>扫描上方二维码即可登录。<br>
+        凭据仅保存在本浏览器会话中、不会下发到前端，其他访客看不到，也无法用你的账号下载。
+      </p>
+    </div>
+  </div>
+</div>
+
+<script src="/static/vendor/vue.global.prod.js"></script>
+<script src="/static/vendor/qrcode.js"></script>
+<script>
+const { createApp, ref, computed } = Vue;
+
+// 两个平台合并成一条通道：用户不用选，粘贴链接后自动识别。
+// 这里的判定顺序必须与后端 main.py 的 _detect_platform 保持一致，
+// 否则会出现「前端提示哔哩哔哩、实际却按抖音解析」的错位。
+const PH = {
+  placeholder: '粘贴抖音 / 哔哩哔哩 分享链接，自动识别平台',
+  tip: '支持抖音短链 v.douyin.com 及「复制链接」得到的整段分享文字；支持 B 站 b23.tv 短链、bilibili.com/video/BV… 长链、裸 BV / av 号，多分P视频解析后可切换选集',
+  empty: '请先粘贴视频分享链接',
+};
+
+// 轮询间隔：B 站官方建议 2~3 秒，再快也没有意义
+const POLL_MS = 2000;
+
+// 按输入判断平台，返回 'douyin' / 'bilibili'，识别不出返回 ''
+// 判定顺序必须与后端 main.py 的 _detect_platform 严格一致，否则会出现
+// 「前端提示哔哩哔哩、实际却按抖音解析」的错位：
+//   1) 文本里有链接就先抽出来判定（分享文案里可能混着无关域名）
+//   2) 先认 B 站域名，再认抖音域名
+//   3) 最后才认裸视频号（BV… / av…）——它放在域名之后，是为了避免抖音
+//      分享文案里恰好出现「BV…」字样时被误判成 B 站
+// 正则与后端 _BV_RE / _AV_RE 对齐。
+const RE_BV = /bv[0-9a-z]{10}/;
+const RE_AV = /(?:^|[^\w])av(\d{1,12})(?:[^\d]|$)/;
+
+function detectPlatform(text) {
+  const raw = (text || '').trim();
+  if (!raw) return '';
+  const found = raw.match(/https?:\/\/[^\s"'<>）)]+/i);
+  const link = (found ? found[0] : raw).toLowerCase();
+  if (/bilibili\.com|b23\.tv/.test(link)) return 'bilibili';
+  if (/douyin\.com|iesdouyin\.com/.test(link)) return 'douyin';
+  // 注意这里不能用「仅当没找到链接时」作条件：后端无论有没有链接都会查裸号，
+  // 所以 https://example.com/BV1GJ411x7h7 这种也会被判为 B 站，前端必须一致。
+  if (RE_BV.test(link) || RE_AV.test(link)) return 'bilibili';
+  return '';
+}
+
+createApp({
+  setup() {
+    const url = ref('');
+    const loading = ref(false);
+    const error = ref('');
+    const result = ref(null);
+    const preview = ref(false);
+    const detected = ref('');        // 输入里识别出的平台，仅用于实时提示
+
+    const ph = PH;                   // 两个平台共用一套文案（不再有平台切换）
+
+    // 登录态（B 站）
+    const login = ref({ logged_in: false, source: 'none', user: {}, can_logout: false, notice: '' });
+    const busyKey = ref('');        // 正在服务端合并的档位 key
+    const dlError = ref('');        // 合并/下载失败的提示
+    const qr = ref({ visible: false, loading: false, key: '', svg: '', status: '', message: '' });
+    const diag = ref({ loading: false, data: null, rows: [], dashRows: [] });
+    let pollTimer = null;
+
+    const isBili = computed(() => !!result.value && result.value.platform === 'bilibili');
+    const topQuality = computed(() => {
+      const qs = (result.value && result.value.qualities) || [];
+      return qs.length ? qs[0].label : '—';
+    });
+
+    const coverSrc = computed(() =>
+      result.value && result.value.cover
+        ? '/api/cover?url=' + encodeURIComponent(result.value.cover)
+        : ''
+    );
+    const avatarSrc = computed(() =>
+      login.value.user && login.value.user.avatar
+        ? '/api/cover?url=' + encodeURIComponent(login.value.user.avatar)
+        : ''
+    );
+
+    function autoDetect() {
+      detected.value = detectPlatform(url.value);
+    }
+
+    async function parse(page) {
+      if (!url.value) { error.value = PH.empty; return; }
+      loading.value = true;
+      error.value = '';
+      result.value = null;
+      busyKey.value = '';
+      dlError.value = '';
+      try {
+        let api = '/api/parse?url=' + encodeURIComponent(url.value);
+        if (page) api += '&p=' + page;              // 仅分P切换时带，抖音侧会忽略
+        const r = await fetch(api);
+        let data = null;
+        try { data = await r.json(); } catch (e) { /* 非 JSON 响应 */ }
+        if (!r.ok || !data || !data.ok) {
+          error.value = (data && (data.message || (typeof data.detail === 'string' && data.detail)))
+            || '解析失败，请稍后重试';
+        } else {
+          result.value = data;
+          // 平台由后端判定（前端只做实时提示），以返回的 platform 为准
+          if (data.platform) detected.value = data.platform;
+          // 后端是按本会话凭据解析的，据此同步登录态显示
+          if (data.platform === 'bilibili' && data.logged_in !== undefined) {
+            login.value.logged_in = !!data.logged_in;
+            // 已登录但还没拿到昵称/头像（例如 loadLogin 尚未返回就点了解析），补查一次
+            if (login.value.logged_in && !(login.value.user && login.value.user.name)) {
+              loadLogin();
+            }
+          }
+        }
+      } catch (e) {
+        error.value = '网络错误：请确认后端服务已启动';
+      }
+      loading.value = false;
+    }
+
+    function selectPage(page) {
+      if (result.value && page === result.value.current_page) return;
+      parse(page);
+    }
+
+    // 需要服务端合并音轨的档位数量（用于给出「为什么要等」的说明）
+    const mergeCount = computed(() => {
+      const qs = (result.value && result.value.qualities) || [];
+      return qs.filter(q => q.needs_merge).length;
+    });
+
+    function downloadName(q) {
+      const base = result.value;
+      const pageTag = base.total_pages > 1 ? '-P' + base.current_page : '';
+      return (base.author + '-' + base.video_id + pageTag + '-' + q.label)
+        .replace(/[\\/:*?"<>|\s]+/g, '_') + '.mp4';
+    }
+
+    function downloadUrl(q) {
+      const base = result.value;
+      const filename = encodeURIComponent(downloadName(q));
+      // DASH 档位：把 bvid/cid 交给后端，由它在下载那一刻重新申请直链
+      // （直链带时效签名，存下来再传回来可能已过期），下载后调 ffmpeg 合并。
+      if (q.format === 'dash') {
+        return '/api/dash?bvid=' + encodeURIComponent(base.video_id)
+             + '&cid=' + encodeURIComponent(base.cid)
+             + '&qn=' + encodeURIComponent(q.qn)
+             + '&codecid=' + encodeURIComponent(q.codecid || 0)
+             + '&filename=' + filename;
+      }
+      return '/api/download?url=' + encodeURIComponent(q.urls[0])
+           + '&filename=' + filename;
+    }
+
+    // 普通 MP4 直链交给浏览器原生下载（可断点续传、有进度条）；
+    // DASH 需要服务端先合并，用 fetch 以便显示「合并中」并接住后端错误。
+    async function onDownload(ev, q) {
+      if (q.format !== 'dash') return;
+      ev.preventDefault();
+      if (busyKey.value) return;
+      busyKey.value = q.key;
+      dlError.value = '';
+      try {
+        const r = await fetch(downloadUrl(q));
+        if (!r.ok) {
+          let msg = '下载失败（HTTP ' + r.status + '）';
+          try {
+            const d = await r.json();
+            if (d && typeof d.detail === 'string') msg = d.detail;
+            else if (d && d.message) msg = d.message;
+          } catch (e) { /* 非 JSON 错误体，用默认文案 */ }
+          dlError.value = msg;
+          return;
+        }
+        const blob = await r.blob();
+        const obj = URL.createObjectURL(blob);
+        const a = document.createElement('a');
+        a.href = obj;
+        a.download = downloadName(q);
+        document.body.appendChild(a);
+        a.click();
+        a.remove();
+        setTimeout(() => URL.revokeObjectURL(obj), 60000);
+      } catch (e) {
+        dlError.value = '合并下载失败：' + ((e && e.message) || '网络错误');
+      } finally {
+        busyKey.value = '';
+      }
+    }
+
+    // ------------------------------------------------------ 登录相关
+
+    async function loadLogin() {
+      try {
+        const r = await fetch('/api/bili/login');
+        const d = await r.json();
+        if (d && d.ok) login.value = d;
+      } catch (e) { /* 忽略：登录态查询失败不影响解析 */ }
+    }
+
+    function renderQr(text) {
+      try {
+        if (typeof qrcode !== 'function') return '';
+        const q = qrcode(0, 'M');                   // 0 = 自动选版本，M = 中等纠错
+        q.addData(text);
+        q.make();
+        return q.createSvgTag({ cellSize: 4, margin: 0, scalable: true });
+      } catch (e) {
+        return '';
+      }
+    }
+
+    async function openQr() {
+      stopPoll();
+      qr.value = { visible: true, loading: true, key: '', svg: '', status: 'loading',
+                   message: '正在获取二维码…' };
+      try {
+        const r = await fetch('/api/bili/login/qr', { method: 'POST' });
+        const d = await r.json();
+        if (!r.ok || !d.ok) {
+          qr.value.loading = false;
+          qr.value.status = 'error';
+          qr.value.message = (d && d.message) || '获取二维码失败，请稍后重试';
+          return;
+        }
+        qr.value.loading = false;
+        qr.value.key = d.qrcode_key;
+        qr.value.svg = renderQr(d.url);
+        qr.value.status = 'waiting';
+        qr.value.message = '请用哔哩哔哩 App 扫描二维码';
+        startPoll();
+      } catch (e) {
+        qr.value.loading = false;
+        qr.value.status = 'error';
+        qr.value.message = '网络错误：无法获取二维码';
+      }
+    }
+
+    function closeQr() {
+      stopPoll();
+      qr.value.visible = false;
+    }
+
+    function stopPoll() {
+      if (pollTimer) { clearInterval(pollTimer); pollTimer = null; }
+    }
+
+    function startPoll() {
+      stopPoll();
+      pollTimer = setInterval(async () => {
+        if (!qr.value.visible || !qr.value.key) { stopPoll(); return; }
+        let d = null;
+        try {
+          const r = await fetch('/api/bili/login/qr/poll?key=' + encodeURIComponent(qr.value.key));
+          d = await r.json();
+          if (!r.ok) {
+            // 409：二维码已过期或不属于本会话，停止轮询并提示刷新
+            if (d && d.status === 'stale') {
+              stopPoll();
+              qr.value.status = 'expired';
+              qr.value.message = d.message || '二维码已失效，请刷新';
+              return;
+            }
+            return;                            // 其它错误（偶发抖动）跳过本轮，继续轮询
+          }
+        } catch (e) {
+          return;                              // 网络抖动，下一轮继续
+        }
+
+        if (d.status === 'waiting' || d.status === 'scanned' || d.status === 'expired') {
+          qr.value.status = d.status;
+          qr.value.message = d.message || qr.value.message;
+          if (d.status === 'expired') stopPoll();
+          return;
+        }
+
+        if (d.status === 'success') {
+          stopPoll();
+          qr.value.status = 'success';
+          const u = d.user || {};
+          qr.value.message = u.vip
+            ? (d.message || '登录成功（大会员，可解锁 1080P 及以上）')
+            : '登录成功。当前账号非大会员，最高仍为 720P（1080P 及以上需大会员）';
+          login.value = { logged_in: true, source: 'session', user: u,
+                          can_logout: true, notice: '' };
+          // 稍作停顿让用户看到成功提示，然后关窗并重新解析（画质可能变高）
+          setTimeout(() => {
+            qr.value.visible = false;
+            reparse();
+          }, 1400);
+        }
+      }, POLL_MS);
+    }
+
+    function reparse() {
+      const cur = result.value;
+      if (cur && cur.platform === 'bilibili' && url.value) {
+        parse(cur.total_pages > 1 ? cur.current_page : undefined);
+      }
+    }
+
+    async function logoutBili() {
+      try {
+        await fetch('/api/bili/logout', { method: 'POST' });
+      } catch (e) { /* 忽略 */ }
+      login.value = { logged_in: false, source: 'none', user: {}, can_logout: false, notice: '' };
+      diag.value = { loading: false, data: null, rows: [], dashRows: [] };
+      reparse();
+    }
+
+    // ------------------------------------------------------ 画质诊断
+
+    // 把后端返回的 qn 数字转成可读档位名（后端已在 verdict 里用过同一张表）
+    function qnName(qn) {
+      const M = { 6: '240P', 16: '360P', 32: '480P', 64: '720P', 74: '720P60',
+                  80: '1080P', 100: '智能修复', 112: '1080P+', 116: '1080P60',
+                  120: '4K', 125: 'HDR', 126: '杜比视界', 127: '8K' };
+      return M[qn] || (qn ? qn + 'P' : '—');
+    }
+
+    async function runDiag() {
+      if (!url.value) return;
+      diag.value.loading = true;
+      try {
+        let api = '/api/bili/debug?url=' + encodeURIComponent(url.value);
+        const cur = result.value;
+        if (cur && cur.total_pages > 1) api += '&p=' + cur.current_page;
+        const r = await fetch(api);
+        const d = await r.json();
+        if (!r.ok || !d.ok) {
+          diag.value = { loading: false, data: { verdict: (d && d.message) || '诊断失败' }, rows: [], dashRows: [] };
+          return;
+        }
+        const x = d.data;
+        const rows = (x.mp4_probe || []).map((p) => {
+          const got = p.quality_got;
+          const bytes = p.size_bytes;
+          return {
+            ask: p.ask, askName: qnName(p.ask), gotName: qnName(got),
+            ok: !!got, size: bytes ? (bytes / 1024 / 1024).toFixed(1) + ' MB' : '',
+          };
+        });
+        const dashRows = ((x.dash || {}).video_qualities || [])
+          .map((qn) => ({ qn, name: qnName(qn) }))
+          .concat(((x.dash || {}).accept_quality || [])
+            .filter((qn) => !((x.dash || {}).video_qualities || []).includes(qn))
+            .map((qn) => ({ qn, name: qnName(qn) + '（仅声明）' })));
+        diag.value = { loading: false, data: x, rows, dashRows };
+      } catch (e) {
+        diag.value = { loading: false, data: { verdict: '网络错误，无法诊断' }, rows: [], dashRows: [] };
+      }
+    }
+
+    loadLogin();          // 页面打开时查一次登录态
+
+    return {
+      url, loading, error, result, preview, ph, isBili, coverSrc, avatarSrc,
+      topQuality, login, qr, diag, busyKey, dlError, mergeCount, detected,
+      autoDetect, parse, selectPage, downloadUrl, onDownload,
+      openQr, closeQr, logoutBili, runDiag,
+    };
+  }
+}).mount('#app');
+</script>
+</body>
+</html>

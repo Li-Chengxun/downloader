@@ -1,0 +1,22 @@
+# 环境配置（含解析引擎账号密码，绝不提交）
+.env
+
+# 证书
+deploy/certs/
+
+# 部署补丁包（临时产物）
+douyin-deploy-fix.tar.gz
+douyin-downloader-update.tar.gz
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+*.egg-info/
+
+# 编辑器 / 系统
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
