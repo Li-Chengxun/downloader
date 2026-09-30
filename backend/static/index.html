@@ -22,6 +22,16 @@
     color:var(--ink);
     background:linear-gradient(160deg,#e0f3e6 0%,#eef7f0 50%,#e8f4eb 100%);
   }
+  /* 挂载前先藏住整个应用（消除刷新瞬间的「闪一下」）。
+     本页是「裸 HTML 模板 + 运行时 Vue」，Vue 的 <script> 在 body 末尾，
+     浏览器会先把中间那 9000 多字符模板原样渲染一遍：此时 v-if 只是无效属性、
+     {{ }} 也未被替换，于是本该隐藏的 34 个 v-if 元素全部显示，
+     其中包含 2 个 position:fixed 的全屏黑遮罩（封面预览 / 扫码登录），
+     铺满屏幕 → 看起来就像「闪了一下别的页面」。等 Vue 挂载完才恢复。
+     挂载完成后由页脚 JS 摘掉 .booting，页面才显示出来。
+     这里不用 v-cloak：Vue 3 中根容器的属性不参与其 innerHTML 的模板编译，
+     加在 #app 上不会被摘除，反而会导致页面永久空白。 */
+  #app.booting{display:none;}
   .wrap{max-width:680px;margin:0 auto;padding:32px 16px 48px;}
 
   header{text-align:center;margin-bottom:22px;}
@@ -306,7 +316,7 @@
 </style>
 </head>
 <body>
-<div id="app">
+<div id="app" class="booting">
   <div class="wrap">
     <header>
       <h1>📥 视频下载站</h1>
@@ -530,7 +540,10 @@
   </div>
 </div>
 
-<script src="/static/vendor/vue.global.prod.js"></script>
+<!-- onerror 兜底：万一 vendor 静态资源没传全（404），也要把页面显示出来。
+     否则 #app 会永远停在 .booting 状态，用户只看到一片空白、无从判断问题出在哪。 -->
+<script src="/static/vendor/vue.global.prod.js"
+        onerror="document.getElementById('app').classList.remove('booting')"></script>
 <script src="/static/vendor/qrcode.js"></script>
 <script>
 const { createApp, ref, computed } = Vue;
@@ -935,6 +948,10 @@ createApp({
     };
   }
 }).mount('#app');
+
+// mount 是同步的，走到这里 DOM 已经渲染完毕，才把页面显示出来。
+// 与 <style> 里的 #app.booting 配对，消除刷新瞬间的模板闪现。
+document.getElementById('app').classList.remove('booting');
 </script>
 </body>
 </html>
