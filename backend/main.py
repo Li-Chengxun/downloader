@@ -103,6 +103,38 @@ class PackRequest(BaseModel):
     filename: str = ""
     per_image_sec: float = slideshow.DEFAULT_PER_IMAGE_SEC
 
+    # 以下字段只在「打包 zip」时用于生成里面的文案 Word（合成视频用不上）
+    title: str = ""
+    author: str = ""
+    desc: str = ""
+    stats_text: str = ""
+    video_id: str = ""
+    platform: str = "douyin"
+
+
+#: 各平台的作品页地址模板，用于在文案里回填「来源」
+_SOURCE_URL_TPL = {
+    "douyin": "https://www.douyin.com/video/{v}",
+    "bilibili": "https://www.bilibili.com/video/{v}",
+}
+
+
+def _pack_meta(req: PackRequest) -> dict:
+    """整理出写进 Word 文案的元信息。
+
+    来源地址由**服务端**拼，而不是让前端传一个任意 URL —— 文档里印的链接
+    应当是指向作品页的地址，不该是调用方随便给的东西。
+    """
+    vid = (req.video_id or "").strip()
+    tpl = _SOURCE_URL_TPL.get(req.platform or "douyin", _SOURCE_URL_TPL["douyin"])
+    return {
+        "title": req.title,
+        "author": req.author,
+        "desc": req.desc,
+        "stats_text": req.stats_text,
+        "source_url": tpl.format(v=vid) if vid else "",
+    }
+
 
 def _check_image_hosts(images: List[ImageItem]) -> None:
     """只放通两个平台的图床域名。
@@ -487,9 +519,12 @@ def _attachment(name: str, default_ext: str) -> str:
 
 @app.post("/api/images/zip")
 async def api_images_zip(req: PackRequest):
-    """把图文帖的多张图片打包成一个 zip 下载。
+    """把图文帖的图片打包成一个 zip 下载。
 
-    为什么值得单独做：一个图文帖常有 9~30 张图，让用户对着结果卡片逐张点，
+    zip 里除了图片，还会放一份**文案 Word**（``文案.docx``）——
+    图文帖的价值常常在文案上（长图文动辄几千字），只存图片等于丢掉一半内容。
+
+    为什么值得单独做打包：一个图文帖常有 9~30 张图，让用户对着结果卡片逐张点，
     手机上基本没法用。
     """
     if not req.images:
@@ -497,7 +532,8 @@ async def api_images_zip(req: PackRequest):
     _check_image_hosts(req.images)
 
     try:
-        path = await slideshow.pack_zip([im.model_dump() for im in req.images])
+        path = await slideshow.pack_zip([im.model_dump() for im in req.images],
+                                       meta=_pack_meta(req))
     except douyin.ParseError as e:
         return JSONResponse(status_code=422, content={"ok": False, "message": str(e)})
     except Exception:

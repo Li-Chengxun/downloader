@@ -1,9 +1,12 @@
-"""把抖音图文帖（plog）的多张图片合成为一个幻灯片视频。
+"""抖音图文帖（plog）的下载产物生成：图片打包 zip（含文案 Word）/ ffmpeg 合成幻灯片视频。
 
-**为什么必须自己合成**：抖音不为图文帖提供可用的视频。分享页里那个 ``video``
+**为什么合成视频要自己做**：抖音不为图文帖提供可用的视频。分享页里那个 ``video``
 对象是占位符——``play_addr.uri`` 指向 ``images_no_sound_volume_audio_file.mp3``
 （一段空音频），``duration`` 为 0，``bit_rate`` 为空；引擎 A 更是直接返回
 ``media.video = None``。所以"下载成视频"只能由服务端拼：下载图片 → ffmpeg 合成。
+
+**为什么 zip 里要放 Word**：图文帖的价值常常在文案上（长图文动辄几千字），
+只存图片等于把内容丢掉一半。纯文本 docx 便于二次编辑与分享。
 
 **关于声音**：原始 BGM 拿不到（``music.play_url`` 为 null，需登录态才下发），
 因此合成产物是无声的。这一点会在前端明确告知用户，避免以为下载坏了。
@@ -12,7 +15,10 @@
 from __future__ import annotations
 
 import asyncio
+import io
+import re
 import tempfile
+import zipfile
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Sequence
 
@@ -208,17 +214,144 @@ async def build_slideshow(images: Sequence[Dict[str, Any]],
         raise
 
 
-async def pack_zip(images: Sequence[Dict[str, Any]]) -> Path:
-    """把所有图片打包成一个 zip，返回临时文件路径（调用方负责清理）。
+# ---------------------------------------------------------------- Word 文案
+
+#: XML 里非法、但抖音文案里可能混入的控制字符（\t \n \r 之外）。
+#: 不剔除的话 Word 打开会直接报「文件已损坏，无法打开」。
+_XML_BAD_CHARS = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f]")
+
+#: docx 其实就是个 zip，固定这几部分就够了（纯文本段落，不含图片/表格/样式表）
+_CONTENT_TYPES = (
+    '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+    '<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">'
+    '<Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/>'
+    '<Default Extension="xml" ContentType="application/xml"/>'
+    '<Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/>'
+    "</Types>"
+)
+
+_ROOT_RELS = (
+    '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+    '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">'
+    '<Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="word/document.xml"/>'
+    "</Relationships>"
+)
+
+_NS_W = "http://schemas.openxmlformats.org/wordprocessingml/2006/main"
+
+
+def _xml_esc(s: str) -> str:
+    """转义 XML 特殊字符并剔除非法控制字符。"""
+    s = _XML_BAD_CHARS.sub("", s or "")
+    return s.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+
+
+def _docx_para(text: str, *, bold: bool = False, size: int = 0,
+               color: str = "", after: int = 120) -> str:
+    """拼一个段落。``size`` 单位是**半磅**（Word 的惯例），``after`` 是段后间距（1/20 磅）。
+
+    刻意用直接格式（``<w:rPr>``）而不引用样式：这样就不必再塞 ``styles.xml``，
+    少一个部件就少一处可能出错的地方。
+    """
+    rpr = ""
+    if bold:
+        rpr += "<w:b/>"
+    if color:
+        rpr += f'<w:color w:val="{color}"/>'
+    if size:
+        rpr += f'<w:sz w:val="{size}"/><w:szCs w:val="{size}"/>'
+    rpr = f"<w:rPr>{rpr}</w:rPr>" if rpr else ""
+    run = f'<w:r>{rpr}<w:t xml:space="preserve">{_xml_esc(text)}</w:t></w:r>'
+    return (f'<w:p><w:pPr><w:spacing w:after="{after}"/></w:pPr>{run}</w:p>')
+
+
+def build_docx(title: str, author: str = "", desc: str = "",
+               source: str = "", stats_text: str = "") -> bytes:
+    """把图文帖的文案生成一份 .docx 的字节内容。
+
+    **为什么手写 OOXML 而不是用 python-docx**：本项目 ``requirements.txt`` 是用
+    精确版本锁定的，历史上还吃过依赖解析爆炸的亏（见 README 常见问题 17）。
+    为一个「导出文案」的小功能新增依赖、还得跟着重建镜像，不划算。
+    docx 本质就是 zip + 几个固定 XML，而这里只用到最基础的段落与文字格式，手写完全可控。
+
+    排版：标题加粗放大 → 作者/来源/字数一行小字 → 正文按行分段 → 结尾落款。
+    """
+    lines = [ln.strip() for ln in (desc or "").splitlines()]
+    body = [ln for ln in lines if ln]
+    if not body:
+        body = ["（本作品没有文字内容）"]
+
+    parts: List[str] = []
+    if title:
+        parts.append(_docx_para(title, bold=True, size=32, after=200))
+
+    meta = [x for x in (f"作者：{author}" if author else "",
+                        f"来源：{source}" if source else "",
+                        stats_text,
+                        f"全文约 {len(desc or '')} 字") if x]
+    for line in meta:
+        parts.append(_docx_para(line, size=18, color="808080", after=60))
+    if meta:
+        parts.append(_docx_para("", after=120))
+
+    for line in body:
+        parts.append(_docx_para(line, size=22, after=140))
+
+    parts.append(_docx_para("—— 由「抖音 / 哔哩哔哩 视频下载站」导出",
+                            size=16, color="A0A0A0", after=0))
+
+    document = (
+        '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+        f'<w:document xmlns:w="{_NS_W}"><w:body>'
+        + "".join(parts)
+        # A4 页面 + 四边 1 英寸页边距（单位：1/20 磅）
+        + '<w:sectPr><w:pgSz w:w="11906" w:h="16838"/>'
+          '<w:pgMar w:top="1440" w:right="1440" w:bottom="1440" w:left="1440"/>'
+          "</w:sectPr>"
+        + "</w:body></w:document>"
+    )
+
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as z:
+        # [Content_Types].xml 必须是包里的第一个条目，部分解析器对此敏感
+        z.writestr("[Content_Types].xml", _CONTENT_TYPES)
+        z.writestr("_rels/.rels", _ROOT_RELS)
+        z.writestr("word/document.xml", document)
+    return buf.getvalue()
+
+
+#: 文案文件在 zip 里的名字。用中文便于用户一眼认出；
+#: zipfile 会带 UTF-8 标记位，Windows 10+ / macOS / 7-Zip 都能正确显示。
+DOCX_NAME = "文案.docx"
+
+
+def build_docx_bytes(meta: Optional[Dict[str, Any]], image_count: int = 0) -> bytes:
+    """按解析结果里的元信息生成文案 docx。"""
+    m = meta or {}
+    stats = m.get("stats_text") or ""
+    if image_count:
+        stats = (stats + "　" if stats else "") + f"共 {image_count} 张图片"
+    return build_docx(
+        title=(m.get("title") or "").strip(),
+        author=(m.get("author") or "").strip(),
+        desc=m.get("desc") or "",
+        source=m.get("source_url") or "",
+        stats_text=stats,
+    )
+
+
+async def pack_zip(images: Sequence[Dict[str, Any]],
+                   meta: Optional[Dict[str, Any]] = None) -> Path:
+    """把所有图片 + 一份文案 Word 打包成一个 zip，返回临时文件路径（调用方负责清理）。
 
     为什么值得单独做个 zip：一个图文帖常有 9~30 张图，让用户对着结果卡片
     逐张点下载几十次，体验很差——尤其手机上。
+    为什么里面要塞 Word：图文帖的价值常常在**文案**上（长图文尤其），
+    只存图片等于把内容丢掉一半；纯文本的 docx 比 txt 更便于二次编辑和分享。
 
     压缩用 ``ZIP_STORED``（不压缩）：JPEG / WebP 本身已是压缩格式，
     再 deflate 一遍几乎不减小体积，却要白白多花 CPU。
     """
-    import zipfile
-
     items = [im for im in images if (im.get("urls") or im.get("url"))]
     if not items:
         raise SlideshowError("没有可用的图片，无法打包")
@@ -242,6 +375,9 @@ async def pack_zip(images: Sequence[Dict[str, Any]]) -> Path:
         with zipfile.ZipFile(out, "w", zipfile.ZIP_STORED) as z:
             for p in saved:
                 z.write(p, arcname=p.name)
+            # 文案单独放一份 Word。文案为空时也写，里面会说明"没有文字内容"，
+            # 免得用户以为漏了文件。
+            z.writestr(DOCX_NAME, build_docx_bytes(meta, image_count=len(saved)))
         for p in saved:
             try:
                 p.unlink()
