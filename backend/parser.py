@@ -64,6 +64,11 @@ SHARE_TPL = [
     "https://www.iesdouyin.com/share/note/{vid}/",
 ]
 
+#: 分享页重试轮数。实测抖音分享页第一次常常只返回「布局壳」，
+#: 再请求一次就有详情，所以值得多试几轮（见 ``parse_via_share_page``）。
+_SHARE_RETRY = 3
+_SHARE_RETRY_DELAY = 0.6
+
 # 清晰度标签推断：(gear_name 关键词, 短边分辨率下限, 标签)，顺序即优先级
 _LABEL_RULES = [
     ("4k", 2000, "4K"),
@@ -75,22 +80,89 @@ _LABEL_RULES = [
 
 _CODEC_MAP = {"h264": "H.264", "h265": "H.265/HEVC", "hevc": "HEVC", "av1": "AV1"}
 
+#: 图文帖的 ``video.play_addr.uri`` 会指向这个占位文件（一段空音频），``duration`` 也是 0。
+#: 抖音**不为图文帖提供可用的合成视频**，必须识别出来，否则用户会下到一个 0 秒的假视频。
+_FAKE_PLAY_URI = "images_no_sound_volume_audio_file"
+
+
+def _img_ext(url: str) -> str:
+    """取图片直链的扩展名（只看路径部分，忽略后面的签名查询串）。"""
+    path = url.split("?", 1)[0].lower()
+    for e in ("jpeg", "jpg", "webp", "png"):
+        if path.endswith("." + e):
+            return e
+    return ""
+
+
+def _image_entry(raw_urls: List[str], width: int = 0, height: int = 0,
+                 index: int = 0) -> Optional[Dict[str, Any]]:
+    """把一组候选地址整理成一条图片记录；没有可用地址时返回 ``None``。
+
+    **只接受无水印的地址。** 抖音图文帖会同时下发两套图：
+    - ``url_list`` / ``url``   —— 干净原图（实测无「抖音号」水印）
+    - ``download_url_list``    —— 模板名带 ``-water``，实测**带「抖音号」水印**
+
+    字段名极具误导性（叫 download 的那套反而是带水印的），所以这里明确约定：
+    调用方只准把「干净的那套」传进来，带水印的一律不采纳。
+
+    排序上把 JPEG 放前面：与 webp 同尺寸同质量，但格式更通用（Windows 相册、
+    各类编辑器都能直接打开），webp 留作兜底。
+    """
+    urls = [u for u in raw_urls if u]
+    if not urls:
+        return None
+    jpeg = [u for u in urls if _img_ext(u) in ("jpeg", "jpg")]
+    rest = [u for u in urls if u not in jpeg]
+    ordered = jpeg + rest
+    return {
+        "index": index + 1,
+        "url": ordered[0],
+        "urls": ordered,
+        "ext": _img_ext(ordered[0]) or "jpg",
+        "width": int(width or 0),
+        "height": int(height or 0),
+    }
+
 
 class ParseError(Exception):
     """业务解析错误，message 会直接展示给用户。"""
 
 
+class _ShareSkeleton(ParseError):
+    """分享页只返回了「布局壳」：有 ``_ROUTER_DATA``，但没有作品详情节点。
+
+    抖音分享页的响应是非确定的——同一 URL 有一定概率只给壳。
+    这类情况**值得重试**，不能当成最终失败，否则用户会偶发地看到
+    「解析失败」，而其实再请求一次就好了（见 ``parse_via_share_page``）。
+    单独建一个类型，是为了把这种「可以重试的失败」与
+    「作品已删除 / 需要登录」这类**重试也没用**的失败区分开。
+    """
+
+
 # ---------------------------------------------------------------- 基础工具
 
 def extract_video_id(url: str) -> Optional[str]:
-    """从任意形态的抖音链接中提取视频 ID。
+    """从任意形态的抖音链接中提取作品 ID。
 
     覆盖 ``/video/{id}``、``/note/{id}``、``?modal_id={id}``、``?object_id={id}``
     等网页版分享的常见形态。
+
+    最后还有一层兜底：抖音网页版除 video / note 外还有别的路径形态
+    （长图文、合集等），且以后可能再新增。凡是 ``douyin.com`` 的链接，
+    只要路径里出现一个 **15~20 位的独立数字段**，就当作作品 ID——
+    aweme_id 是 19 位，卡这个长度可以避开年份、页码之类的短数字。
+    不加这层的话，陌生路径会直接报「无法识别作品 ID」，
+    而其实拿它去请求分享页是能出结果的。
     """
     text = url or ""
     m = _VIDEO_ID_RE.search(text) or _MODAL_ID_RE.search(text)
-    return m.group(1) if m else None
+    if m:
+        return m.group(1)
+    if "douyin" in text.lower():
+        m = re.search(r"(?<!\d)(\d{15,20})(?!\d)", text.split("?", 1)[0])
+        if m:
+            return m.group(1)
+    return None
 
 
 def _host_of(url: str) -> str:
@@ -180,10 +252,25 @@ async def resolve_canonical_url(url: str, client: Optional[httpx.AsyncClient] = 
             await client.aclose()
 
 
-def make_summary(desc: str, min_len: int = 40, max_len: int = 100) -> str:
+#: 简介太短（< min_len）时的补充文案，以及完全没文案时的兜底。
+#: 按内容类型分开写：图文帖配「选择对应清晰度」这种视频话术会明显不对味。
+_SUMMARY_FILLER = {
+    "video": "，视频由作者发布于抖音平台，选择对应清晰度即可保存原画质的完整视频。",
+    "images": "，这组图文由作者发布于抖音平台，可逐张保存无水印原图，也可合成为视频下载。",
+    "text": "，该文字作品由作者发布于抖音平台。",
+}
+_SUMMARY_EMPTY = {
+    "video": "该视频发布于抖音平台，可通过解析结果查看封面与标题了解具体内容。",
+    "images": "该图文发布于抖音平台，可在下方逐张下载原图，或一键合成为视频。",
+    "text": "该文字作品发布于抖音平台，可在下方查看完整正文。",
+}
+
+
+def make_summary(desc: str, min_len: int = 40, max_len: int = 100,
+                 kind: str = "video") -> str:
     """根据标题/描述生成 50-100 字左右的内容简介。
 
-    标题（desc）足够完整时直接使用；过短则拼接补充说明。
+    标题（desc）足够完整时直接使用；过短则按 ``kind`` 拼接对应的补充说明。
     后期可在这一步替换为 AI 智能摘要接口。
     """
     text = re.sub(r"#\S+", "", desc or "")            # 去掉话题标签
@@ -193,8 +280,8 @@ def make_summary(desc: str, min_len: int = 40, max_len: int = 100) -> str:
             return text
         return text[:max_len].rstrip() + "…"
     if not text:
-        return "该视频发布于抖音平台，可通过解析结果查看封面与标题了解具体内容。"
-    filler = "，视频由作者发布于抖音平台，选择对应清晰度即可保存原画质的完整视频。"
+        return _SUMMARY_EMPTY.get(kind, _SUMMARY_EMPTY["video"])
+    filler = _SUMMARY_FILLER.get(kind, _SUMMARY_FILLER["video"])
     return (text + filler)[:max_len]
 
 
@@ -244,19 +331,36 @@ def _dedupe_sort(qualities: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
 
 
 def _build_result(vid: str, title: str, desc: str, cover: str, nickname: str,
-                  avatar: str, duration_ms: int, qualities: List[Dict[str, Any]]) -> Dict[str, Any]:
+                  avatar: str, duration_ms: int, qualities: List[Dict[str, Any]],
+                  kind: str = "video",
+                  images: Optional[List[Dict[str, Any]]] = None,
+                  stats: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+    """组装对外统一的结果卡片。
+
+    ``kind`` 决定前端用哪套 UI 渲染：
+    - ``video``  普通视频 / 番剧，看 ``qualities``
+    - ``images`` 图文帖（plog），看 ``images``，可逐张下载或合成为视频
+    - ``text``   纯文字帖，既无视频也无图片，只呈现文案
+
+    两个引擎都必须走这个函数，保证抖音侧返回结构始终一致。
+    """
     secs = duration_ms // 1000
     return {
         "ok": True,
+        "kind": kind,
         "video_id": vid,
         "title": title or "（无标题）",
-        "summary": make_summary(desc or title),
+        "summary": make_summary(desc or title, kind=kind),
+        "desc": desc,
         "cover": cover,
         "author": nickname or "未知作者",
         "author_avatar": avatar,
         "duration_ms": duration_ms,
-        "duration_text": f"{secs // 60}:{secs % 60:02d}" if secs else "--:--",
+        # 图文 / 文字帖没有时长，留空让前端整块隐藏（而不是显示 "--:--"）
+        "duration_text": (f"{secs // 60}:{secs % 60:02d}" if secs else "--:--") if kind == "video" else "",
         "qualities": _dedupe_sort(qualities),
+        "images": images or [],
+        "stats": stats or {},
     }
 
 
@@ -348,7 +452,7 @@ async def parse_via_wtf(url: str) -> Dict[str, Any]:
 
 def _map_wtf_payload(p: Dict[str, Any]) -> Dict[str, Any]:
     if p.get("is_deleted") or p.get("is_private"):
-        raise ParseError("该视频已被删除或设为私密")
+        raise ParseError("该作品已被删除或设为私密")
 
     media = p.get("media") or {}
     video = media.get("video") or {}
@@ -399,11 +503,34 @@ def _map_wtf_payload(p: Dict[str, Any]) -> Dict[str, Any]:
             "urls": [u for u in ([video.get("url")] + list(video.get("urls") or [])) if u],
         })
 
+    # 图文帖（plog）：引擎把 kind 直接标成 image_album，并且 streams 为空、video 为 null，
+    # 所以老的代码走到下面那句 raise 就报「未获取到可用的视频流地址」——这是
+    # "解析不了图文"在引擎 A 侧的表现。图片地址同样是**干净的那一套**。
+    images: List[Dict[str, Any]] = []
+    for im in media.get("images") or []:
+        if not isinstance(im, dict):
+            continue
+        raw = list(im.get("urls") or [])
+        if im.get("url"):
+            raw.insert(0, im["url"])
+        entry = _image_entry(raw, im.get("width") or 0, im.get("height") or 0, len(images))
+        if entry:
+            images.append(entry)
+
+    stats = p.get("stats") or {}
+
+    # 只有「没有可下载的视频流」时才认作文图。反过来先判图片是有风险的：
+    # 万一视频帖也带 media.images（封面帧之类），视频就会被误判成图文。
+    if images and not qualities:
+        return _build_result(vid, title, desc, cover or images[0]["url"],
+                             author.get("nickname") or "", avatar, 0, [],
+                             kind="images", images=images, stats=stats)
+
     if not qualities:
         raise ParseError("未获取到可用的视频流地址")
 
     return _build_result(vid, title, desc, cover, author.get("nickname") or "",
-                         avatar, duration, qualities)
+                         avatar, duration, qualities, stats=stats)
 
 
 def _largest(covers: List[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
@@ -428,15 +555,14 @@ async def _resolve_short_url(client: httpx.AsyncClient, url: str) -> str:
     return url
 
 
-async def _fetch_share_html(client: httpx.AsyncClient, vid: str) -> Optional[str]:
-    """请求移动端分享页，返回包含 _ROUTER_DATA 的 HTML。"""
-    for tpl in SHARE_TPL:
-        try:
-            r = await client.get(tpl.format(vid=vid), follow_redirects=True)
-        except httpx.HTTPError:
-            continue
-        if r.status_code == 200 and "_ROUTER_DATA" in r.text:
-            return r.text
+async def _fetch_share_html(client: httpx.AsyncClient, vid: str, tpl: str) -> Optional[str]:
+    """请求单个分享页模板，返回含 ``_ROUTER_DATA`` 的 HTML（不判断内容是否完整）。"""
+    try:
+        r = await client.get(tpl.format(vid=vid), follow_redirects=True)
+    except httpx.HTTPError:
+        return None
+    if r.status_code == 200 and "_ROUTER_DATA" in r.text:
+        return r.text
     return None
 
 
@@ -463,14 +589,27 @@ def _parse_router_data(html: str) -> Dict[str, Any]:
     loader = data.get("loaderData") or {}
     if not loader:
         raise ParseError("_ROUTER_DATA 中缺少 loaderData")
-    page = loader[next(iter(loader))] or {}
-    res = page.get("videoInfoRes") or {}
+
+    # ⚠️ 不能盲取第一个键。loaderData 的实际形状是：
+    #     {"video_layout": None, "video_(id)/page": {...}}   ← 视频页
+    #     {"note_layout":  None, "note_(id)/page":  {...}}   ← 图文页
+    # 「*_layout」是布局节点，恒为 null；真正的数据在「*_(id)/page」里。
+    # 原来写的 loader[next(iter(loader))] 恰好取到那个 null，于是
+    # **图文帖一律报「未获取到视频信息」**——这就是"解析不了 plog"的根因。
+    page = next((v for v in loader.values()
+                 if isinstance(v, dict) and isinstance(v.get("videoInfoRes"), dict)), None)
+    if page is None:
+        # 只拿到布局壳（loaderData 里全是 *_layout: null）。这属于**可重试**的失败，
+        # 交给调用方换模板/重试，见 _ShareSkeleton。
+        raise _ShareSkeleton("分享页未返回作品详情节点")
+
+    res = page["videoInfoRes"]
     items = res.get("item_list") or []
     if not items:
         toast = res.get("toast")
         raise ParseError(
             (toast if isinstance(toast, str) and toast else "")
-            or "未获取到视频信息：视频可能已被删除、设为私密，或被风控拦截"
+            or "未获取到作品信息：作品可能已被删除、设为私密，或被风控拦截"
         )
     return items[0]
 
@@ -499,19 +638,33 @@ def _balanced_json(text: str, start: int) -> Optional[str]:
     return None
 
 
-def _parse_local_item(item: Dict[str, Any]) -> Dict[str, Any]:
-    """把本地 _ROUTER_DATA 的 item_list[0] 映射为标准结果。"""
-    video = item.get("video") or {}
-    author = item.get("author") or {}
-    desc = (item.get("desc") or "").strip()
-    duration = int(item.get("duration") or video.get("duration") or 0)
+def _local_images(item: Dict[str, Any]) -> List[Dict[str, Any]]:
+    """从分享页 item 里取图文帖图片（只用无水印的那套地址）。
 
-    cover = ""
-    for k in ("origin_cover", "cover", "dynamic_cover"):
-        urls = (video.get(k) or {}).get("url_list") or []
-        if urls:
-            cover = urls[0]
-            break
+    刻意**不碰** ``download_url_list``：它的模板名带 ``-water``，实测图上会压
+    「抖音号 xxxxx」水印（``url_list`` 同位置是干净的）。详见 ``_image_entry``。
+    """
+    out: List[Dict[str, Any]] = []
+    for i, im in enumerate(item.get("images") or []):
+        if not isinstance(im, dict):
+            continue
+        entry = _image_entry(im.get("url_list") or [], im.get("width") or 0,
+                             im.get("height") or 0, len(out))
+        if entry:
+            out.append(entry)
+    return out
+
+
+def _local_qualities(video: Dict[str, Any], duration: int) -> List[Dict[str, Any]]:
+    """从分享页的 ``item.video`` 提取可下载档位。
+
+    图文帖同样带一个 ``video`` 对象，但它是**占位符**：``play_addr`` 指向
+    ``images_no_sound_volume_audio_file.mp3``（一段空音频），``duration`` 为 0。
+    若不识别，图文帖会被当成"有一个 0 秒的视频"，用户下到的就是坏文件。
+    """
+    pa_top = video.get("play_addr") or {}
+    if _FAKE_PLAY_URI in str(pa_top.get("uri") or ""):
+        return []
 
     qualities: List[Dict[str, Any]] = []
     for br in video.get("bit_rate") or []:
@@ -535,33 +688,78 @@ def _parse_local_item(item: Dict[str, Any]) -> Dict[str, Any]:
             "codec": _CODEC_MAP.get(codec_raw, "H.264"),
             "urls": urls,
         })
-    if not qualities:
-        pa = video.get("play_addr") or {}
-        urls = pa.get("url_list") or []
+    if not qualities and not _FAKE_PLAY_URI in str(pa_top.get("uri") or ""):
+        urls = pa_top.get("url_list") or []
         if urls:
-            w = int(pa.get("width") or 0)
-            h = int(pa.get("height") or 0)
+            w = int(pa_top.get("width") or 0)
+            h = int(pa_top.get("height") or 0)
             qualities.append({
                 "key": "default",
                 "label": _label_from_dims(w, h),
                 "width": w,
                 "height": h,
-                "size_bytes": pa.get("data_size"),
-                "size_text": _fmt_size(pa.get("data_size")),
+                "size_bytes": pa_top.get("data_size"),
+                "size_text": _fmt_size(pa_top.get("data_size")),
                 "codec": "H.264",
                 "urls": urls,
             })
-    if not qualities:
-        raise ParseError("未获取到可用的视频流地址")
+    return qualities
+
+
+def _parse_local_item(item: Dict[str, Any]) -> Dict[str, Any]:
+    """把本地 _ROUTER_DATA 的 item_list[0] 映射为标准结果。
+
+    同一个函数要能吃下抖音的三类内容：视频 / 图文帖 / 纯文字帖。
+    判定顺序是**先看图片再看视频**——因为图文帖也带着 ``video`` 字段，
+    但那是空音频占位符（见 ``_local_qualities``）。
+    """
+    video = item.get("video") or {}
+    author = item.get("author") or {}
+    desc = (item.get("desc") or "").strip()
+    duration = int(item.get("duration") or video.get("duration") or 0)
+
+    cover = ""
+    for k in ("origin_cover", "cover", "dynamic_cover"):
+        urls = (video.get(k) or {}).get("url_list") or []
+        if urls:
+            cover = urls[0]
+            break
+
+    images = _local_images(item)
+    qualities = _local_qualities(video, duration)
 
     avatar_urls = (author.get("avatar_thumb") or {}).get("url_list") or []
-    return _build_result(str(item.get("aweme_id") or ""), desc, desc, cover,
-                         author.get("nickname") or "", avatar_urls[0] if avatar_urls else "",
-                         duration, qualities)
+    vid = str(item.get("aweme_id") or "")
+    nickname = author.get("nickname") or ""
+    avatar = avatar_urls[0] if avatar_urls else ""
+    stats = item.get("statistics") or {}
+
+    if images and not qualities:
+        # 图文帖：封面退回第一张图（图文帖的 video.cover 往往也是占位内容）。
+        # 加 ``not qualities`` 是为了稳妥——万一视频帖也带 images，视频优先。
+        return _build_result(vid, desc, desc, cover or images[0]["url"], nickname,
+                             avatar, 0, [], kind="images", images=images, stats=stats)
+    if qualities:
+        return _build_result(vid, desc, desc, cover, nickname, avatar,
+                             duration, qualities, stats=stats)
+    # 既无视频也无图片 = 纯文字帖。以前这里会抛「未获取到可用的视频流地址」，
+    # 用户看到的是"解析失败"，但其实内容本身是好的，只是没有媒体可下。
+    if not desc:
+        raise ParseError("未获取到可用的视频流地址")
+    return _build_result(vid, desc, desc, cover, nickname, avatar, 0, [],
+                         kind="text", stats=stats)
+
 
 
 async def parse_via_share_page(url: str) -> Dict[str, Any]:
-    """引擎 B：短链重定向 + 分享页 _ROUTER_DATA 本地解析。"""
+    """引擎 B：短链重定向 + 分享页 _ROUTER_DATA 本地解析。
+
+    抖音分享页的返回是**非确定的**：同一个 URL，第一次常常只给出「布局壳」
+    （``loaderData`` 里全是 ``*_layout: null``，没有详情节点），再请求一次才有内容。
+    所以这里必须按模板 + 轮次重试，**直到真正解析出作品**——
+    早期版本只要 HTML 里出现 ``_ROUTER_DATA`` 就当作成功，
+    结果拿到壳就往下解析，必然报错，表现为「偶发解析失败」。
+    """
     headers = {
         "User-Agent": MOBILE_UA,
         "Accept-Language": "zh-CN,zh;q=0.9",
@@ -572,12 +770,26 @@ async def parse_via_share_page(url: str) -> Dict[str, Any]:
             url = await _resolve_short_url(client, url)
         vid = extract_video_id(url)
         if not vid:
-            raise ParseError("无法从链接中识别视频 ID，请确认是完整的抖音分享链接")
-        html = await _fetch_share_html(client, vid)
-    if html is None:
-        raise ParseError("分享页请求失败（可能被风控），请稍后重试")
-    item = _parse_router_data(html)
-    return _parse_local_item(item)
+            raise ParseError("无法从链接中识别作品 ID，请确认是完整的抖音分享链接")
+
+        skeleton: Optional[Exception] = None
+        tried = False
+        for _ in range(_SHARE_RETRY):
+            for tpl in SHARE_TPL:
+                html = await _fetch_share_html(client, vid, tpl)
+                if html is None:
+                    continue
+                tried = True
+                try:
+                    return _parse_local_item(_parse_router_data(html))
+                except _ShareSkeleton as e:
+                    skeleton = e            # 只是壳，换模板/重试
+                # 其它 ParseError（作品已删除、需登录等）直接上抛，重试也没用
+            await asyncio.sleep(_SHARE_RETRY_DELAY)
+
+    if tried:
+        raise ParseError("分享页暂时只返回了空壳（抖音响应不稳），请稍后重试") from skeleton
+    raise ParseError("分享页请求失败（可能被风控），请稍后重试")
 
 
 # ================================================================ 主入口

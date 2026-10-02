@@ -70,9 +70,6 @@ import asyncio
 import os
 import re
 import secrets
-import shutil
-import subprocess
-import sys
 import tempfile
 import time
 from pathlib import Path
@@ -80,6 +77,11 @@ from typing import Any, Dict, List, Optional
 from urllib.parse import urlparse
 
 import httpx
+
+# ffmpeg 的定位与探测放在共享模块里——抖音图文帖合成幻灯片视频也依赖同一套逻辑
+# （含 WinGet 0 字节 shim 那类坑）。这里重新导出，保持 ``bili.ffmpeg_path`` /
+# ``bili.cleanup_dir`` 等既有调用点不变。
+from ffmpeg_tool import FFMPEG_BIN, cleanup_dir, ffmpeg_path  # noqa: F401
 
 # 桌面端 UA：B 站接口对移动端 UA 的返回略有差异，桌面端最稳定
 PC_UA = (
@@ -225,15 +227,6 @@ _CODEC_NAMES: Dict[int, str] = {
 #: 编码兼容性优先级，数字越小越通用。
 #: H.264 几乎所有播放器都能放；AV1 / H.266 兼容性差，仅在无更优选择时使用。
 _CODEC_PRIORITY: Dict[int, int] = {7: 0, 12: 1, 13: 2, 14: 3}
-
-#: ffmpeg 可执行文件路径。留空则用 PATH 里的 ffmpeg（Docker 镜像里是 apt 装的）。
-FFMPEG_BIN = os.environ.get("FFMPEG_BIN", "").strip()
-
-#: ffmpeg 可用性探测缓存：``(路径或 None, 探测时刻)``，见 ``ffmpeg_path``。
-_ffmpeg_cache: Optional[tuple] = None
-
-#: 探测结果缓存时长（秒）。不能永久缓存——用户可能在服务运行期间才装上 ffmpeg。
-_FFMPEG_TTL = 600.0
 
 _VIEW_ERRORS = {
     -400: "请求参数有误，请确认链接是否完整",
@@ -1020,61 +1013,12 @@ def merge_formats(mp4: List[Dict[str, Any]],
 
 # ---------------------------------------------------------------- DASH
 
-def _ffmpeg_runs(path: str) -> bool:
-    """真的执行一次 ``ffmpeg -version``，确认这个路径**跑得起来**。
-
-    只判断「文件是否存在」是不够的。实测（Windows + WinGet 安装的 ffmpeg）：
-    ``WinGet\\Links`` 目录下会留下一个 **0 字节的 reparse point**，
-    ``shutil.which()`` 能找到它、``Path.exists()`` 也是 True，
-    但真正执行会抛 ``OSError [WinError 193] 不是有效的 Win32 应用程序``。
-
-    这类「占着名字却跑不起来」的情况若漏过检测，用户就会看到 DASH 档位、
-    点下去、等上十几秒，最后拿到一个报错——正是 ``dash_supported`` 要避免的。
-    """
-    try:
-        r = subprocess.run(
-            [path, "-version"],
-            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=15,
-        )
-        return r.returncode == 0
-    except (OSError, subprocess.SubprocessError):
-        return False
-
-
-def ffmpeg_path() -> Optional[str]:
-    """返回**确认可执行**的 ffmpeg 路径；没有则返回 ``None``。
-
-    合并 DASH 音视频必须依赖 ffmpeg。没装时不应该把 DASH 档位列给用户
-    （否则点了必然失败），所以前端展示要以此为准（见 ``dash_supported``）。
-
-    这里刻意做**真实执行探测**而非单纯的存在性检查，原因见 ``_ffmpeg_runs``。
-    探测会起一个子进程（约几十毫秒），因此结果按 ``_FFMPEG_TTL`` 缓存；
-    不能永久缓存——用户可能在服务运行期间才装上 ffmpeg。
-    """
-    global _ffmpeg_cache
-    now = time.monotonic()
-    if _ffmpeg_cache and (now - _ffmpeg_cache[1]) < _FFMPEG_TTL:
-        return _ffmpeg_cache[0]
-
-    candidates: List[str] = []
-    if FFMPEG_BIN:
-        candidates.append(FFMPEG_BIN)            # 显式配置优先，方便覆盖 PATH 里的坏路径
-    found = shutil.which("ffmpeg")
-    if found and found not in candidates:
-        candidates.append(found)
-
-    path = next((c for c in candidates if Path(c).exists() and _ffmpeg_runs(c)), None)
-    _ffmpeg_cache = (path, now)
-    if path is None and candidates:
-        # 找到了名字却跑不起来，这是最容易让人困惑的情形，值得留下日志线索
-        print(f"[bilibili] 检测到 ffmpeg 候选 {candidates} 但均无法执行，"
-              f"DASH 高清档位将不展示。可用 FFMPEG_BIN 指定正确的可执行文件路径。",
-              file=sys.stderr)
-    return path
-
-
 def dash_supported() -> bool:
-    """当前环境能否提供 DASH 合并下载。"""
+    """当前环境能否提供 DASH 合并下载。
+
+    ``ffmpeg_path`` / ``cleanup_dir`` 已抽到 ``ffmpeg_tool`` 共享模块
+    （抖音图文帖合成视频也用它），本模块只保留这个 B 站语义的判定。
+    """
     return ffmpeg_path() is not None
 
 
@@ -1354,14 +1298,6 @@ async def build_dash_file(bvid: str = "", cid: int = 0, qn: int = 0, codecid: in
     except Exception:
         cleanup_dir(tmpdir)
         raise
-
-
-def cleanup_dir(d: Path) -> None:
-    """删除临时目录（供下载接口在响应结束后调用，失败也不抛）。"""
-    try:
-        shutil.rmtree(d, ignore_errors=True)
-    except Exception:
-        pass
 
 
 # ---------------------------------------------------------------- 诊断

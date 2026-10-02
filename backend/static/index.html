@@ -305,6 +305,46 @@
   }
   @keyframes sp{to{transform:rotate(360deg);}}
 
+  /* 图文帖（plog）：图片网格 + 两种下载形式。
+     用网格而不是横滑条——一个帖子常有 9~30 张图，横滑要一路拖。
+     每张图下面挂一个「原图」链接，整帖再给「打包下载」和「下载成视频」两个出口。 */
+  .plog{margin-top:16px;}
+  .plog-grid{
+    display:grid;grid-template-columns:repeat(auto-fill,minmax(118px,1fr));
+    gap:8px;margin:10px 0 14px;
+  }
+  .plog-item{
+    margin:0;position:relative;border:1px solid var(--line);border-radius:10px;
+    overflow:hidden;background:#f6fbf8;
+  }
+  .plog-item img{
+    display:block;width:100%;height:128px;object-fit:cover;cursor:zoom-in;
+  }
+  .plog-item .plog-no{
+    position:absolute;top:5px;left:5px;padding:1px 6px;border-radius:999px;
+    background:rgba(0,0,0,.55);color:#fff;font-size:11px;font-weight:600;
+  }
+  .plog-item .plog-dl{
+    display:block;padding:5px 0;text-align:center;font-size:12px;font-weight:600;
+    color:var(--ink-soft);background:#fff;border-top:1px solid var(--line);
+    text-decoration:none;font-family:inherit;
+  }
+  .plog-item .plog-dl:hover{color:var(--primary-dark);background:#f2faf5;}
+  .plog-actions{display:flex;gap:10px;flex-wrap:wrap;}
+  .plog-actions .btn{flex:1 1 190px;}
+  /* 次要按钮：图文帖里两个下载入口并列，主次分明才不会都像"立即下载" */
+  .btn.ghost{
+    background:#fff;color:var(--primary-dark);border:1.5px solid var(--line);box-shadow:none;
+  }
+  .btn.ghost:hover{background:#f2faf5;border-color:#b8e0c8;}
+  .stat-line{color:var(--ink-soft);font-size:12.5px;margin-top:10px;}
+  /* 纯文字帖：没有媒体可下，就把正文完整呈现出来 */
+  .post-text{
+    background:#f2faf5;border:1px solid #e0f2e7;border-radius:12px;
+    padding:12px 14px;font-size:14px;line-height:1.9;
+    white-space:pre-wrap;word-break:break-word;
+  }
+
   footer{text-align:center;color:var(--ink-soft);font-size:12px;margin-top:8px;line-height:1.8;}
 
   @media (max-width:480px){
@@ -337,19 +377,23 @@
     </section>
 
     <section v-if="result" class="card">
-      <div class="cover-wrap" v-if="coverSrc">
-        <img :src="coverSrc" class="cover" alt="视频封面" @click="preview = true">
+      <!-- 图文帖不单独显示封面：下面的图片网格已经把每张图都铺出来了 -->
+      <div class="cover-wrap" v-if="coverSrc && !isImages">
+        <img :src="coverSrc" class="cover" alt="视频封面" @click="preview = coverSrc">
       </div>
       <h2 class="title">
-        <span class="badge" :class="{ bili: isBili }">{{ isBangumi ? '哔哩哔哩番剧' : (isBili ? '哔哩哔哩' : '抖音') }}</span>
+        <span class="badge" :class="{ bili: isBili }">{{ kindLabel }}</span>
         {{ result.title }}
       </h2>
       <div class="meta">
         <span>👤 {{ result.author }}</span>
-        <span>⏱ {{ result.duration_text }}</span>
+        <span v-if="result.duration_text">⏱ {{ result.duration_text }}</span>
+        <span v-if="isImages">🖼 {{ result.images.length }} 张图片</span>
         <span>🆔 {{ result.video_id }}</span>
       </div>
-      <div class="summary"><b>内容简介：</b>{{ result.summary }}</div>
+      <!-- 纯文字帖：summary 会截断，正文要完整呈现 -->
+      <div class="post-text" v-if="isText">{{ result.desc }}</div>
+      <div class="summary" v-else><b>内容简介：</b>{{ result.summary }}</div>
 
       <!-- 普通视频：分P切换 -->
       <div class="pages" v-if="!isBangumi && result.total_pages > 1">
@@ -386,6 +430,43 @@
                   :class="{ on: s.current }" :title="s.title"
                   @click="selectSeason(s)">{{ s.title || ('S' + s.season_id) }}</button>
         </div>
+      </div>
+
+      <!-- 图文帖（plog）：图片网格 + 两种下载形式。
+           服务端不给"合成视频"的入口时（没装 ffmpeg）按钮直接不显示，
+           而不是让用户点了才失败——与 DASH 档位的处理一致。 -->
+      <div class="plog" v-if="isImages">
+        <h3>图片（共 {{ result.images.length }} 张）</h3>
+        <div class="plog-grid">
+          <figure class="plog-item" v-for="im in result.images" :key="im.index">
+            <span class="plog-no">{{ im.index }}</span>
+            <img :src="imgSrc(im)" :alt="'第' + im.index + '张'" loading="lazy"
+                 @click="preview = imgSrc(im)">
+            <a class="plog-dl" :href="imgDownloadUrl(im)" :download="imgName(im)"
+               :title="'下载第 ' + im.index + ' 张原图'">⬇ 原图</a>
+          </figure>
+        </div>
+
+        <div v-if="dlError" class="dl-error">⚠️ {{ dlError }}</div>
+
+        <div class="plog-actions">
+          <button class="btn ghost" :disabled="!!busyKey" @click="downloadZip">
+            {{ busyKey === 'zip' ? '⏳ 打包中…' : '🗂 打包下载全部（zip）' }}
+          </button>
+          <button class="btn" v-if="canSlideshow" :disabled="!!busyKey" @click="downloadSlideshow">
+            {{ busyKey === 'slideshow' ? '⏳ 合成中…' : '🎬 下载成视频' }}
+          </button>
+        </div>
+        <p class="tip">
+          每张图都下载<strong>无水印原图</strong>（抖音另有一套带「抖音号」水印的地址，已刻意不用）。
+          <template v-if="canSlideshow">
+            合成的视频是<strong>无声幻灯片</strong>——抖音不提供图文帖的背景音乐。
+          </template>
+          <template v-else>
+            服务器未安装 ffmpeg，暂时无法合成视频，可先用打包下载。
+          </template>
+        </p>
+        <p class="stat-line" v-if="statText">{{ statText }}</p>
       </div>
 
       <!-- 本集下不了时的说明（会员专享 / 地区限制）。
@@ -488,9 +569,9 @@
     </footer>
   </div>
 
-  <!-- 封面预览 -->
-  <div v-if="preview" class="mask zoom" @click="preview = false">
-    <img :src="coverSrc" alt="封面大图">
+  <!-- 图片预览：封面与图文帖的任意一张都走这里（preview 存的是要放大的图片地址） -->
+  <div v-if="preview" class="mask zoom" @click="preview = ''">
+    <img :src="preview" alt="大图">
   </div>
 
   <!-- 扫码登录 -->
@@ -593,7 +674,7 @@ createApp({
     const loading = ref(false);
     const error = ref('');
     const result = ref(null);
-    const preview = ref(false);
+    const preview = ref('');         // 要放大的图片地址；空串表示不显示预览层
     const detected = ref('');        // 输入里识别出的平台，仅用于实时提示
 
     const ph = PH;                   // 两个平台共用一套文案（不再有平台切换）
@@ -609,6 +690,29 @@ createApp({
     const isBili = computed(() => !!result.value && result.value.platform === 'bilibili');
     // 番剧（PGC）与普通投稿（UGC）的选集方式完全不同，前端据此切换 UI
     const isBangumi = computed(() => !!result.value && result.value.kind === 'bangumi');
+    // 抖音侧的内容类型：图文帖（plog）和纯文字帖各有自己的渲染分支。
+    // kind 由后端判定（两个引擎都会带上），前端只负责分发，避免两边规则打架。
+    const isImages = computed(() => !!result.value && result.value.kind === 'images');
+    const isText = computed(() => !!result.value && result.value.kind === 'text');
+    const kindLabel = computed(() => {
+      if (isBangumi.value) return '哔哩哔哩番剧';
+      if (isBili.value) return '哔哩哔哩';
+      if (isImages.value) return '抖音图文';
+      if (isText.value) return '抖音文字';
+      return '抖音';
+    });
+    // 合成视频依赖服务端 ffmpeg。后端在解析结果里回报这个能力，
+    // 前端据此决定要不要给按钮——不让用户点了才知道不行（同 DASH 档位的做法）。
+    const canSlideshow = computed(() => !!(result.value && result.value.server_ffmpeg));
+    const statText = computed(() => {
+      const s = (result.value && result.value.stats) || {};
+      const parts = [];
+      if (s.digg_count) parts.push('❤ ' + s.digg_count);
+      if (s.collect_count) parts.push('⭐ ' + s.collect_count);
+      if (s.comment_count) parts.push('💬 ' + s.comment_count);
+      if (s.share_count) parts.push('↗ ' + s.share_count);
+      return parts.length ? '互动数据：' + parts.join('　') : '';
+    });
     const topQuality = computed(() => {
       const qs = (result.value && result.value.qualities) || [];
       return qs.length ? qs[0].label : '—';
@@ -757,6 +861,100 @@ createApp({
         setTimeout(() => URL.revokeObjectURL(obj), 60000);
       } catch (e) {
         dlError.value = '合并下载失败：' + ((e && e.message) || '网络错误');
+      } finally {
+        busyKey.value = '';
+      }
+    }
+
+    // ------------------------------------------------------ 图文帖（plog）
+
+    // 图片一律走 /api/cover 代理：抖音图床要在请求头里带 Referer，
+    // 交给服务端统一加，顺便避免直连外域图片的跨域/混合内容问题。
+    function imgSrc(im) {
+      return '/api/cover?url=' + encodeURIComponent(im.url);
+    }
+
+    function baseName() {
+      const b = result.value;
+      return (b.author + '-' + b.video_id).replace(/[\\/:*?"<>|\s]+/g, '_');
+    }
+
+    function imgName(im) {
+      // 序号补零，多张图下载后按文件名排序就是帖子里的顺序
+      return baseName() + '-' + String(im.index).padStart(2, '0') + '.' + (im.ext || 'jpg');
+    }
+
+    function imgDownloadUrl(im) {
+      return '/api/download?url=' + encodeURIComponent(im.url)
+           + '&filename=' + encodeURIComponent(imgName(im));
+    }
+
+    function packPayload() {
+      const b = result.value;
+      return {
+        images: (b.images || []).map(im => ({
+          url: im.url, urls: im.urls || [],
+          width: im.width, height: im.height, ext: im.ext,
+        })),
+        filename: baseName(),
+      };
+    }
+
+    async function postBinary(api, body) {
+      const r = await fetch(api, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(body),
+      });
+      if (!r.ok) {
+        let msg = '请求失败（HTTP ' + r.status + '）';
+        try {
+          const d = await r.json();
+          if (d && typeof d.detail === 'string') msg = d.detail;
+          else if (d && d.message) msg = d.message;
+        } catch (e) { /* 非 JSON 错误体，用默认文案 */ }
+        throw new Error(msg);
+      }
+      return r.blob();
+    }
+
+    function saveBlob(blob, name) {
+      const obj = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = obj;
+      a.download = name;
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+      setTimeout(() => URL.revokeObjectURL(obj), 60000);
+    }
+
+    // 打包与合成都属于「服务端忙一会儿、回一个大文件」，所以用 fetch 取 blob：
+    // 这样能显示进行中状态，也能接住后端的中文错误文案（与 DASH 合并同一套做法）。
+    async function downloadZip() {
+      if (busyKey.value) return;
+      busyKey.value = 'zip';
+      dlError.value = '';
+      try {
+        const p = packPayload();
+        saveBlob(await postBinary('/api/images/zip', p), p.filename + '.zip');
+      } catch (e) {
+        dlError.value = '打包失败：' + ((e && e.message) || '网络错误');
+      } finally {
+        busyKey.value = '';
+      }
+    }
+
+    async function downloadSlideshow() {
+      if (busyKey.value) return;
+      busyKey.value = 'slideshow';
+      dlError.value = '';
+      try {
+        const p = packPayload();
+        p.per_image_sec = 3;                     // 每张停留 3 秒
+        saveBlob(await postBinary('/api/slideshow', p), p.filename + '_幻灯片.mp4');
+      } catch (e) {
+        dlError.value = '合成视频失败：' + ((e && e.message) || '网络错误');
       } finally {
         busyKey.value = '';
       }
@@ -945,6 +1143,9 @@ createApp({
       topQuality, login, qr, diag, busyKey, dlError, mergeCount, detected,
       autoDetect, parse, selectPage, selectEpisode, selectSeason, downloadUrl, onDownload,
       openQr, closeQr, logoutBili, runDiag,
+      // 图文帖（plog）/ 纯文字帖
+      isImages, isText, kindLabel, canSlideshow, statText,
+      imgSrc, imgName, imgDownloadUrl, downloadZip, downloadSlideshow,
     };
   }
 }).mount('#app');
