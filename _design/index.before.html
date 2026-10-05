@@ -3,72 +3,25 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<meta name="theme-color" content="#f5f7fb">
-<!-- 站点标记：圆角方块里两根竖条，用站点自己的动作色 -->
-<link rel="icon" href="data:image/svg+xml,<svg xmlns=%22http://www.w3.org/2000/svg%22 viewBox=%220 0 34 34%22><rect width=%2234%22 height=%2234%22 rx=%229%22 fill=%22%234f46e5%22/><rect x=%229%22 y=%229%22 width=%226%22 height=%2216%22 rx=%222%22 fill=%22%23ffffff%22/><rect x=%2219%22 y=%229%22 width=%226%22 height=%2216%22 rx=%222%22 fill=%22%23c7d2fe%22/></svg>">
-<title>抖音、哔哩哔哩 视频与图文下载</title>
+<meta name="theme-color" content="#e0f3e6">
+<link rel="icon" href="data:image/svg+xml,<svg xmlns=%22http://www.w3.org/2000/svg%22 viewBox=%220 0 100 100%22><text y=%22.9em%22 font-size=%2290%22>📥</text></svg>">
+<title>抖音 / 哔哩哔哩 视频下载站</title>
 <style>
-  /* ============================================================
-     设计立场：清爽现代
-
-     上一版走的是"编辑排版"路线——去掉圆角、阴影、颜色，只留灰底黑块细线。
-     克制过头就成了贫瘠：读起来像表格或内部工具，而不是有质感的产品。
-
-     这一版把质感补回来，但守两条纪律，避免滑向"满屏圆角卡片的模板感"：
-
-     1) **分工明确**：靛蓝只用于「动作」（取回 / 下载），
-        平台色只用于「信息」（徽标 / 识别状态），两者绝不混用。
-        中性色负责其余一切。颜色因此始终带着含义。
-     2) **层级靠投影和底色差，不靠描边**。三种圆角对应三种层级
-        （控件 14 / 面板 20 / 标签 胶囊），不是所有东西一个圆角。
-
-     仍然只用系统字体（这站要能离线使用）。
-     ============================================================ */
   :root{
-    --ground:#f5f7fb;        /* 底：冷调浅灰蓝 */
-    --surface:#ffffff;       /* 浮层 */
-    --inset:#f9fafb;         /* 内嵌面：摘要、档位行、信息块 */
-    --chip:#f3f4f6;          /* 中性标签底 */
-
-    --ink:#111827;           /* 墨 */
-    --ink-soft:#6b7280;      /* 次级文字 */
-    --ink-faint:#9ca3af;     /* 最淡：占位、编号 */
-    --line:#e5e7eb;          /* 实在需要描边时才用的细线 */
-
-    --accent:#4f46e5;        /* 动作色：靛蓝 */
-    --accent-ink:#4338ca;    /* 动作色的深调，用于文字 */
-    --accent-soft:#eef2ff;   /* 动作色的浅底 */
-
-    --douyin:#111827;        /* 平台色 —— 抖音 */
-    --bili:#e4577e;          /* 平台色 —— 哔哩哔哩 */
-    --bili-ink:#be185d;
-    --bili-soft:#fce7f3;
-
-    --alarm:#dc2626;
-    --alarm-soft:#fef2f2;
-
-    --r-ctl:14px;            /* 控件 */
-    --r-panel:20px;          /* 面板 */
-    --r-pill:99px;           /* 标签 */
-
-    --sh-1:0 1px 2px rgba(16,24,40,.06), 0 6px 20px rgba(16,24,40,.06);
-    --sh-2:0 1px 2px rgba(16,24,40,.05), 0 14px 40px rgba(16,24,40,.08);
-    --sh-accent:0 6px 18px rgba(79,70,229,.34);
-
-    --font:"PingFang SC","Microsoft YaHei","Hiragino Sans GB",system-ui,-apple-system,"Segoe UI",sans-serif;
+    --ink:#253330;
+    --ink-soft:#6d7f78;
+    --line:#ddeee2;
+    --primary:#3bbd7a;
+    --primary-dark:#2e9e63;
+    --bili:#e5739a;
+    --shadow:0 12px 32px rgba(42,150,88,.12);
   }
-  *{box-sizing:border-box;-webkit-tap-highlight-color:transparent;}
-  html{min-height:100%;}
-  /* 让页脚落在视口底部：内容少时页面不会像"浮在顶上"，
-     多出来的空白读起来是页边距，而不是"没做完" */
-  body{
-    margin:0;padding:0;min-height:100vh;display:flex;flex-direction:column;
-    font-family:var(--font);font-size:16px;
-    color:var(--ink);background:var(--ground);
-    -webkit-font-smoothing:antialiased;-moz-osx-font-smoothing:grayscale;
+  *{box-sizing:border-box; -webkit-tap-highlight-color:transparent;}
+  html,body{margin:0;padding:0;min-height:100%;
+    font-family:"PingFang SC","Microsoft YaHei","Hiragino Sans GB",system-ui,sans-serif;
+    color:var(--ink);
+    background:linear-gradient(160deg,#e0f3e6 0%,#eef7f0 50%,#e8f4eb 100%);
   }
-  #app{display:flex;flex-direction:column;flex:1;}
-
   /* 挂载前先藏住整个应用（消除刷新瞬间的「闪一下」）。
      本页是「裸 HTML 模板 + 运行时 Vue」，Vue 的 <script> 在 body 末尾，
      浏览器会先把中间那 9000 多字符模板原样渲染一遍：此时 v-if 只是无效属性、
@@ -79,413 +32,348 @@
      这里不用 v-cloak：Vue 3 中根容器的属性不参与其 innerHTML 的模板编译，
      加在 #app 上不会被摘除，反而会导致页面永久空白。 */
   #app.booting{display:none;}
+  .wrap{max-width:680px;margin:0 auto;padding:32px 16px 48px;}
 
-  /* 质量底线：键盘焦点看得见、选中态有反馈 */
-  :focus-visible{outline:2px solid var(--accent);outline-offset:2px;border-radius:4px;}
-  ::selection{background:var(--accent);color:#fff;}
+  header{text-align:center;margin-bottom:22px;}
+  header h1{margin:0;font-size:26px;font-weight:800;letter-spacing:1px;}
+  header .sub{color:var(--ink-soft);font-size:13px;margin-top:8px;}
 
-  .wrap{max-width:1000px;margin:0 auto;padding:0 28px 80px;
-    flex:1;display:flex;flex-direction:column;width:100%;}
-
-  /* ---------- 报头 ---------- */
-  header{display:flex;align-items:center;gap:10px;padding:26px 0 0;}
-  .mark{width:17px;height:17px;display:block;flex:0 0 auto;}
-  .brand{margin:0;font-size:13.5px;font-weight:700;color:var(--ink);}
-
-  /* ---------- 主标题 ---------- */
-  .hero{padding:44px 0 28px;}
-  .hero h1{
-    margin:0;font-weight:800;line-height:1.14;
-    font-size:clamp(30px,5.2vw,42px);letter-spacing:-.022em;
+  .card{
+    background:#fff;border:1px solid var(--line);border-radius:20px;
+    box-shadow:var(--shadow);padding:20px;margin-bottom:18px;
   }
-  .lede{margin:15px 0 0;max-width:30em;font-size:14.5px;line-height:1.75;color:var(--ink-soft);}
-  /* 出结果之后主标题让位：内容才是主角 */
-  .hero.compact{padding:26px 0 20px;}
-  .hero.compact .lede{display:none;}
 
-  /* ---------- 输入区 ---------- */
-  .composer{margin-bottom:8px;}
+  /* 自动识别提示：不需要用户选平台，只在他粘贴链接后告诉他会走哪条通道 */
+  .detect{
+    display:inline-flex;align-items:center;gap:6px;margin:0 0 12px;
+    padding:6px 12px;border-radius:999px;font-size:13px;font-weight:600;
+    background:#eef6ff;border:1px solid #cfe3f7;color:#2f6291;
+  }
+  .detect.bili{background:#fdeef4;border-color:#f7cfdd;color:#a83b6b;}
+  .detect.none{background:#f4f5f4;border-color:var(--line);color:var(--ink-soft);font-weight:500;}
+
   .input-row{display:flex;gap:10px;}
   .input-row input{
-    flex:1;min-width:0;padding:16px 18px;font-size:15px;font-family:inherit;
-    color:var(--ink);background:var(--surface);
-    border:none;border-radius:var(--r-ctl);box-shadow:var(--sh-1);
-    outline:none;transition:box-shadow .16s ease;
+    flex:1;padding:12px 14px;font-size:15px;color:var(--ink);
+    border:1.5px solid var(--line);border-radius:12px;background:#f6fbf8;
+    outline:none;transition:border-color .15s, box-shadow .15s, background .15s;font-family:inherit;
   }
-  .input-row input::placeholder{color:var(--ink-faint);}
-  .input-row input:focus{box-shadow:var(--sh-1), 0 0 0 3px var(--accent-soft);}
-
-  /* ---------- 识别状态：一枚浅底胶囊，不是整条色块。
-       上一版那条贯穿全宽的实心黑带太钝，这里改成克制的信息标签。 ---------- */
-  .band{
-    display:inline-flex;align-items:center;gap:8px;
-    margin-top:14px;padding:8px 16px;border-radius:var(--r-pill);
-    background:var(--chip);color:var(--ink-faint);
-    font-size:13px;font-weight:600;
-    transition:background .18s ease,color .18s ease;
-  }
-  .band-mark{width:7px;height:7px;border-radius:var(--r-pill);background:currentColor;flex:0 0 auto;}
-  .band.on{background:var(--chip);color:var(--douyin);}
-  .band.on.bili{background:var(--bili-soft);color:var(--bili-ink);}
-
-  .tip{margin:16px 0 0;font-size:12.5px;line-height:1.75;color:var(--ink-soft);}
-
-  /* ---------- 空状态：把「支持什么」摆出来 ----------
-     首屏只有标题+输入框会空一大片；这里补上真实有用的信息，
-     顺便让用户在粘之前就知道自己手上的东西能不能用。 */
-  .supports{margin-top:40px;}
-  .supports h3{margin:0 0 15px;}
-  /* 双列排布把宽屏用满——单列时右半边会空掉一大片 */
-  .supports-list{
-    display:grid;grid-template-columns:auto 1fr auto 1fr;gap:12px 26px;
-    align-items:baseline;margin:0;
-  }
-  /* display:contents 让 dt/dd 直接参与外层网格，这样五行的标签列能对齐 */
-  .supports-list>div{display:contents;}
-  .supports-list dt{font-size:13.5px;font-weight:700;white-space:nowrap;}
-  .supports-list dd{margin:0;font-size:13.5px;line-height:1.6;color:var(--ink-soft);}
-  /* 使用要点：拆成短句列举，比挤成一整行好扫得多 */
-  .hints{
-    margin:26px 0 0;padding:0;list-style:none;
-    display:grid;grid-template-columns:1fr 1fr;gap:10px 26px;
-  }
-  .hints li{
-    position:relative;padding-left:17px;
-    font-size:12.5px;line-height:1.7;color:var(--ink-soft);
-  }
-  .hints li::before{
-    content:"";position:absolute;left:0;top:.62em;
-    width:7px;height:1.5px;background:var(--ink-faint);
-  }
-  .hints strong{color:var(--ink);font-weight:700;}
-  .error{
-    margin:16px 0 0;padding:14px 16px;border-radius:var(--r-ctl);
-    font-size:13.5px;line-height:1.75;
-    color:var(--alarm);background:var(--alarm-soft);
-  }
-
-  /* ---------- 按钮：靛蓝只出现在「动作」上 ---------- */
+  .input-row input:focus{border-color:var(--primary);background:#fff;box-shadow:0 0 0 3px rgba(59,189,122,.15);}
   .btn{
-    padding:16px 32px;font-family:inherit;font-size:15px;font-weight:700;
-    letter-spacing:.01em;color:#fff;background:var(--accent);
-    border:none;border-radius:var(--r-ctl);cursor:pointer;white-space:nowrap;
-    box-shadow:var(--sh-accent);
-    transition:background .16s ease,box-shadow .16s ease,transform .06s ease;
+    padding:12px 22px;font-size:15px;font-weight:700;letter-spacing:1px;color:#fff;
+    background:var(--primary);border:none;border-radius:12px;cursor:pointer;white-space:nowrap;
+    box-shadow:0 6px 16px rgba(59,189,122,.35);transition:background .15s, transform .06s;font-family:inherit;
   }
-  .btn:hover{background:#4338ca;}
-  .btn:active{transform:translateY(1px);}
-  .btn:disabled{background:#c7d2fe;box-shadow:none;cursor:not-allowed;}
-  .btn.ghost{
-    background:var(--accent-soft);color:var(--accent-ink);box-shadow:none;
+  .btn:hover{background:var(--primary-dark);}
+  .btn:active{transform:scale(.97);}
+  .btn:disabled{opacity:.6;cursor:not-allowed;}
+
+  .error{
+    color:#c0564a;background:#fdf1f0;border:1px solid #f5d9d5;
+    border-radius:10px;padding:10px 12px;font-size:14px;margin-top:12px;
+    line-height:1.7;text-align:left;
   }
-  .btn.ghost:hover{background:#e0e7ff;}
+  .tip{color:var(--ink-soft);font-size:12px;margin:12px 0 0;line-height:1.7;}
 
-  /* ---------- 结果卡：白色浮层 ---------- */
-  .card{
-    background:var(--surface);border-radius:var(--r-panel);
-    padding:26px;margin-top:26px;box-shadow:var(--sh-2);
-  }
-
-  /* ---------- 结果头：封面与文字并排 ----------
-     宽屏下如果让封面独占一行，右边会空掉一大片，所以并排。
-     文字用 flex 而不是固定列宽，标题长短都能自适应。 */
-  .head{display:grid;grid-template-columns:290px 1fr;gap:26px;align-items:start;}
-  .head.solo{grid-template-columns:1fr;}      /* 没有封面（图文帖 / 无封面）时占满 */
-  .head-main{min-width:0;}
-
-  /* 封面只是"认出是哪个作品"用的，不该抢走下载信息的注意力。
-     同时设 max-width 与 max-height，等比缩放、不裁切——竖版封面也不会被切掉大半。 */
-  .cover-wrap{margin:0;}
+  .cover-wrap{text-align:center;}
   .cover{
-    display:block;max-width:100%;max-height:290px;
-    border-radius:var(--r-ctl);cursor:zoom-in;
+    max-width:100%;max-height:360px;border-radius:14px;cursor:zoom-in;
+    box-shadow:0 8px 24px rgba(37,51,48,.18);
   }
-
-  .title{margin:0 0 12px;font-size:19px;line-height:1.5;font-weight:700;letter-spacing:-.01em;word-break:break-word;}
+  .title{font-size:17px;line-height:1.7;margin:16px 0 8px;word-break:break-word;}
+  .meta{display:flex;flex-wrap:wrap;gap:6px 16px;color:var(--ink-soft);font-size:13px;margin-bottom:12px;}
   .badge{
-    display:inline-block;margin-right:9px;vertical-align:2px;
-    padding:3px 10px;border-radius:var(--r-pill);
-    font-size:11.5px;font-weight:700;
-    background:var(--chip);color:var(--douyin);
+    display:inline-block;font-size:11px;font-weight:700;color:var(--primary-dark);
+    background:#e7f7ee;border:1px solid #c9ecda;border-radius:6px;
+    padding:1px 6px;vertical-align:2px;
   }
-  .badge.bili{background:var(--bili-soft);color:var(--bili-ink);}
-
-  .meta{display:flex;flex-wrap:wrap;gap:5px 24px;margin:0 0 18px;}
-  .meta>div{display:flex;align-items:baseline;min-width:0;}
-  .meta dt{margin:0 9px 0 0;font-size:12.5px;color:var(--ink-faint);white-space:nowrap;}
-  .meta dd{margin:0;font-size:13px;color:var(--ink-soft);font-variant-numeric:tabular-nums;word-break:break-all;}
-
+  .badge.bili{color:#b5506f;background:#fdeef3;border-color:#f7d5e0;}
   .summary{
-    background:var(--inset);border-radius:var(--r-ctl);
-    padding:14px 16px;font-size:13.5px;line-height:1.8;color:#4b5563;
+    background:#f2faf5;border:1px solid #e0f2e7;border-radius:12px;
+    padding:12px 14px;font-size:14px;line-height:1.8;
   }
-  .summary b{font-weight:600;color:var(--ink-soft);}
+  .card h3{font-size:15px;margin:18px 0 0;}
 
-  h3{margin:28px 0 12px;font-size:14.5px;font-weight:700;letter-spacing:.01em;}
-
-  /* ---------- 清晰度：每一档是一块内嵌面，靠投影和底色分层 ---------- */
-  .qualities{display:flex;flex-direction:column;gap:10px;}
-  .q-item{
-    display:flex;align-items:center;justify-content:space-between;gap:20px;
-    padding:15px 16px;border-radius:var(--r-ctl);background:var(--inset);
-  }
-  /* 「最高」档用一圈主色内描边标出——这里是唯一允许出现描边的地方，
-     因为它表达的是"推荐"，是信息 */
-  .q-item.best{box-shadow:inset 0 0 0 1.5px var(--accent);background:var(--surface);}
-  .q-main{flex:1;min-width:0;}
-  .q-label{display:flex;align-items:baseline;gap:9px;flex-wrap:wrap;}
-  .q-name{font-size:15.5px;font-weight:600;}
-  .q-item.best .q-name{font-weight:800;}
-  .q-tags{display:flex;gap:6px;flex-wrap:wrap;}
-  .q-tags i{
-    font-style:normal;padding:2px 8px;border-radius:var(--r-pill);
-    font-size:11px;font-weight:700;
-    background:var(--accent-soft);color:var(--accent-ink);
-  }
-  .q-tags i.tag-merge{background:var(--chip);color:var(--ink-soft);}
-  .q-info{
-    margin-top:4px;display:flex;flex-wrap:wrap;gap:3px 14px;
-    font-size:12.5px;color:var(--ink-faint);font-variant-numeric:tabular-nums;
-  }
-  .dl-hint{margin-top:5px;font-size:12px;color:var(--ink-soft);}
-  /* 体积对比条：填住档位行中间那块空白，同时让"这一档有多大"一眼可比。
-     刻意做得细、且一律用中性色——否则容易被误读成"正在下载"的进度条。
-     "最高"档由左侧内描边和实心按钮标记，不靠这条再强调一遍。 */
-  .q-bar{margin-top:9px;height:3px;border-radius:var(--r-pill);background:var(--chip);overflow:hidden;}
-  .q-bar>span{display:block;height:100%;border-radius:var(--r-pill);background:#c3c8d0;
-    transition:width .3s ease;}
-  .q-item.best .q-bar>span{background:#9aa1ad;}
-  .q-side{display:flex;align-items:center;gap:16px;flex:0 0 auto;}
-  .q-size{font-size:13.5px;font-weight:700;white-space:nowrap;font-variant-numeric:tabular-nums;}
-  .dl{
-    display:inline-block;padding:9px 22px;border-radius:11px;
-    font-size:13px;font-weight:700;text-decoration:none;white-space:nowrap;
-    color:var(--accent-ink);background:var(--accent-soft);
-    transition:background .16s ease,color .16s ease;
-  }
-  .dl:hover{background:#e0e7ff;}
-  .q-item.best .dl{background:var(--accent);color:#fff;box-shadow:var(--sh-accent);}
-  .q-item.best .dl:hover{background:#4338ca;}
-  .dl.busy{background:#c7d2fe;color:#fff;pointer-events:none;box-shadow:none;}
-  .dl-error{
-    margin:12px 0;padding:13px 16px;border-radius:var(--r-ctl);
-    font-size:13px;line-height:1.7;color:var(--alarm);background:var(--alarm-soft);
-  }
-  .muted{color:var(--ink-soft);font-size:13px;line-height:1.75;}
-
-  /* ---------- 分P / 选集：胶囊 ---------- */
-  .pages{margin-top:26px;}
-  .pages-head{margin-bottom:10px;font-size:13px;color:var(--ink-soft);}
-  .pages-list{display:flex;gap:8px;overflow-x:auto;padding-bottom:4px;}
+  /* 分P选集 */
+  .pages{margin-top:14px;}
+  .pages-head{font-size:13px;color:var(--ink-soft);margin-bottom:8px;}
+  .pages-list{display:flex;gap:6px;overflow-x:auto;padding-bottom:6px;}
   .page-btn{
-    flex:0 0 auto;max-width:190px;padding:8px 15px;font-family:inherit;
-    font-size:13px;font-weight:600;color:var(--ink-soft);
-    background:var(--chip);border:none;border-radius:var(--r-pill);
-    cursor:pointer;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;
-    transition:background .16s ease,color .16s ease;
+    flex:0 0 auto;padding:6px 12px;font-size:13px;font-weight:600;color:var(--ink-soft);
+    background:#f6fbf8;border:1.5px solid var(--line);border-radius:999px;
+    cursor:pointer;transition:all .15s;font-family:inherit;max-width:190px;
+    overflow:hidden;text-overflow:ellipsis;white-space:nowrap;
   }
-  .page-btn:hover{background:#e5e7eb;color:var(--ink);}
-  .page-btn.active{background:var(--accent);color:#fff;font-weight:700;}
+  .page-btn:hover{border-color:#b8e0c8;color:var(--ink);}
+  .page-btn.active{
+    color:#fff;background:var(--primary);border-color:var(--primary);font-weight:700;
+  }
 
-  .eps{margin-top:26px;}
-  .eps-head{display:flex;align-items:baseline;gap:10px;flex-wrap:wrap;margin-bottom:10px;font-size:13px;color:var(--ink-soft);}
-  .eps-head .cur{font-weight:700;color:var(--ink);}
-  .eps-scroll{max-height:250px;overflow-y:auto;padding:2px;}
-  .eps-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(56px,1fr));gap:7px;}
+  /* 番剧选集：用**网格**而不是分P那样的横滑条——长篇番剧动辄上百集，
+     横滑要一路拖到底，网格能直接扫视全部集数。 */
+  .eps{margin-top:14px;}
+  .eps-head{display:flex;align-items:baseline;gap:8px;flex-wrap:wrap;margin-bottom:8px;font-size:13px;}
+  .eps-head .t{color:var(--ink-soft);}
+  .eps-head .cur{font-weight:700;color:var(--bili);}
+  .eps-scroll{
+    max-height:230px;overflow-y:auto;border:1px solid var(--line);
+    border-radius:12px;background:#fbfefc;
+  }
+  .eps-grid{
+    display:grid;grid-template-columns:repeat(auto-fill,minmax(54px,1fr));
+    gap:6px;padding:8px;
+  }
   .ep-btn{
-    position:relative;padding:9px 4px;font-family:inherit;font-size:13px;font-weight:600;
-    color:var(--ink-soft);background:var(--chip);border:none;border-radius:10px;
-    cursor:pointer;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;
-    transition:background .16s ease,color .16s ease;
+    position:relative;padding:8px 4px;font-size:13px;font-weight:600;color:var(--ink-soft);
+    background:#fff;border:1.5px solid var(--line);border-radius:8px;cursor:pointer;
+    font-family:inherit;transition:all .15s;overflow:hidden;
+    text-overflow:ellipsis;white-space:nowrap;
   }
-  .ep-btn:hover{background:#e5e7eb;color:var(--ink);}
-  .ep-btn.active{background:var(--accent);color:#fff;font-weight:700;}
-  .ep-btn.locked{background:var(--inset);color:#c7cbd1;}
-  .ep-btn.locked::after{content:"";position:absolute;top:5px;right:5px;width:4px;height:4px;border-radius:50%;background:#d1d5db;}
-  .ep-sec{grid-column:1/-1;padding:7px 9px;border-radius:8px;background:var(--inset);
-    font-size:11.5px;font-weight:700;color:var(--ink-faint);}
-  .seasons{display:flex;gap:8px;overflow-x:auto;margin-top:10px;padding-bottom:4px;}
+  .ep-btn:hover{border-color:#e9b0c6;color:var(--ink);}
+  .ep-btn.active{color:#fff;background:var(--bili);border-color:var(--bili);font-weight:700;}
+  /* 会员专享角标：只是「这一集是付费集」的提示，不代表一定下不了
+     ——登录大会员后同一集就能下，所以不把按钮禁用掉。 */
+  .ep-btn.locked::after{
+    content:'会员';position:absolute;top:0;right:0;font-size:9px;line-height:1.2;
+    padding:1px 3px;border-bottom-left-radius:6px;font-weight:700;
+    background:linear-gradient(135deg,#ffe9a8,#ffd064);color:#8a5a00;
+  }
+  .ep-btn.active.locked::after{background:#fff5cc;color:#8a5a00;}
+  /* 正片之后的 PV / 花絮分组标题（横跨整行） */
+  .ep-sec{
+    grid-column:1/-1;font-size:12px;font-weight:700;color:var(--ink-soft);
+    margin:8px 0 0;padding-top:8px;border-top:1px dashed var(--line);
+  }
+  .ep-sec:first-child{border-top:none;margin-top:0;padding-top:0;}
+
+  /* 同作品的其他季（长篇番剧的分季切换） */
+  .seasons{display:flex;gap:6px;overflow-x:auto;padding:8px 0 4px;}
   .season-btn{
-    flex:0 0 auto;padding:8px 14px;font-family:inherit;font-size:12.5px;font-weight:600;
-    color:var(--ink-soft);background:var(--chip);border:none;border-radius:var(--r-pill);
-    cursor:pointer;white-space:nowrap;transition:background .16s ease,color .16s ease;
+    flex:0 0 auto;max-width:210px;padding:5px 11px;font-size:12.5px;font-weight:600;
+    color:#a83b6b;background:#fdeef4;border:1.5px solid #f7cfdd;border-radius:999px;
+    cursor:pointer;font-family:inherit;transition:all .15s;
+    overflow:hidden;text-overflow:ellipsis;white-space:nowrap;
   }
-  .season-btn:hover{background:#e5e7eb;color:var(--ink);}
-  .season-btn.on{background:var(--bili-soft);color:var(--bili-ink);}
+  .season-btn:hover{border-color:var(--bili);}
+  .season-btn.on{color:#fff;background:var(--bili);border-color:var(--bili);font-weight:700;}
 
+  /* 「本集不可下载」——会员专享 / 地区限制。用醒目的暖色而不是红色：
+     这不是错误，只是当前账号权限不够，卡片其余部分仍然可用。 */
   .locked-note{
-    margin-top:20px;padding:16px;border-radius:var(--r-ctl);
-    background:var(--inset);font-size:13.5px;line-height:1.8;color:#4b5563;
+    margin-top:16px;padding:13px 15px;border-radius:12px;font-size:13.5px;
+    line-height:1.8;text-align:left;
+    background:#fffaf0;border:1px solid #f4e2b8;color:#8a6a1e;
   }
+  .locked-note b{color:#7a5a10;}
 
-  /* ---------- B 站登录条 ---------- */
+  /* 登录状态条 */
   .login-bar{
-    display:flex;align-items:center;gap:12px;flex-wrap:wrap;
-    margin-top:22px;padding:14px 16px;border-radius:var(--r-ctl);
-    background:var(--inset);font-size:13px;color:var(--ink-soft);
+    display:flex;align-items:center;gap:10px;flex-wrap:wrap;
+    margin-top:16px;padding:11px 13px;border-radius:12px;font-size:13px;
+    background:#fff8f9;border:1px solid #fbe0e8;
   }
-  .login-bar .grow{flex:1;min-width:13em;line-height:1.75;}
-  .login-bar .who{color:var(--ink);font-weight:700;}
-  .avatar{width:26px;height:26px;border-radius:50%;object-fit:cover;}
+  .login-bar.on{background:#f0f9f3;border-color:#d4ecd9;}
+  .login-bar .avatar{
+    width:26px;height:26px;border-radius:50%;flex:0 0 auto;
+    border:1.5px solid #fff;box-shadow:0 1px 4px rgba(0,0,0,.12);object-fit:cover;
+  }
+  .login-bar .grow{flex:1;min-width:0;color:#8a6a72;line-height:1.5;}
+  .login-bar.on .grow{color:var(--ink-soft);}
+  .login-bar .who{font-weight:700;color:#b5506f;}
+  .login-bar.on .who{color:var(--primary-dark);}
   .vip-chip{
-    font-style:normal;margin-left:6px;padding:2px 8px;border-radius:var(--r-pill);
-    font-size:11px;font-weight:700;color:#fff;background:var(--bili);
+    display:inline-block;font-style:normal;font-size:11px;font-weight:700;
+    color:#8a5a00;background:linear-gradient(135deg,#ffe9a8,#ffd064);
+    border-radius:5px;padding:1px 5px;margin-left:5px;vertical-align:1px;
   }
   .mini-btn{
-    padding:8px 15px;font-family:inherit;font-size:12.5px;font-weight:700;
-    color:var(--ink);background:var(--chip);border:none;border-radius:var(--r-pill);
-    cursor:pointer;white-space:nowrap;transition:background .16s ease,color .16s ease;
+    flex:0 0 auto;padding:7px 13px;font-size:13px;font-weight:700;cursor:pointer;
+    color:#fff;background:var(--bili);border:none;border-radius:9px;
+    font-family:inherit;transition:filter .15s, transform .06s;
   }
-  .mini-btn:hover{background:#e5e7eb;}
-  .mini-btn.ghost{background:var(--accent-soft);color:var(--accent-ink);}
-  .mini-btn.ghost:hover{background:#e0e7ff;}
-  .mini-btn:disabled{opacity:.5;cursor:not-allowed;}
+  .mini-btn:hover{filter:brightness(1.06);}
+  .mini-btn:active{transform:scale(.97);}
+  .mini-btn.ghost{
+    color:var(--ink-soft);background:#fff;border:1.5px solid var(--line);
+  }
+  .mini-btn.ghost:hover{color:var(--ink);border-color:#c9d8cf;filter:none;}
+  .mini-btn:disabled{opacity:.6;cursor:not-allowed;}
 
-  /* ---------- 画质诊断 ---------- */
-  .diag{margin-top:20px;border-radius:var(--r-ctl);overflow:hidden;background:var(--inset);}
-  .diag-head{
-    display:flex;align-items:center;justify-content:space-between;
-    padding:13px 16px;font-size:13px;
+  .diag{
+    margin-top:12px;padding:14px;border:1px solid #e3e9f0;border-radius:12px;
+    background:#fbfcfe;font-size:13px;
   }
+  .diag-head{display:flex;justify-content:space-between;align-items:center;margin-bottom:8px;}
   .diag-x{
-    padding:0;font-family:inherit;font-size:12.5px;font-weight:700;
-    color:var(--ink-faint);background:transparent;border:none;cursor:pointer;
+    font-size:12px;color:var(--ink-soft);background:none;border:none;
+    cursor:pointer;font-family:inherit;text-decoration:underline;padding:0;
   }
-  .diag-x:hover{color:var(--ink);}
-  .diag-verdict{margin:0;padding:0 16px 14px;font-size:13.5px;line-height:1.8;color:#4b5563;}
-  .diag-meta{padding:0 16px 14px;font-size:12.5px;line-height:1.8;color:var(--ink-faint);font-variant-numeric:tabular-nums;}
-  .diag-table{width:100%;border-collapse:collapse;font-size:12.5px;background:var(--surface);}
+  .diag-verdict{margin:0 0 8px;line-height:1.7;color:var(--ink);}
+  .diag-meta{color:var(--ink-soft);font-size:12px;margin-bottom:10px;}
+  .diag-table{width:100%;border-collapse:collapse;font-size:12.5px;}
   .diag-table th{
-    padding:9px 16px;text-align:left;font-weight:700;color:var(--ink-soft);
-    background:var(--inset);
+    text-align:left;color:var(--ink-soft);font-weight:600;
+    border-bottom:1px solid #e3e9f0;padding:4px 6px;
   }
-  .diag-table td{padding:9px 16px;color:#4b5563;font-variant-numeric:tabular-nums;}
-  .diag-table th:last-child,.diag-table td:last-child{text-align:right;}
+  .diag-table td{padding:4px 6px;border-bottom:1px solid #f0f3f7;}
+  .diag-table tr:last-child td{border-bottom:none;}
+  .diag-table .muted{color:var(--ink-soft);}
 
-  /* ---------- 长文全文 ---------- */
-  .article{margin-top:20px;}
-  .article-head{display:flex;align-items:baseline;gap:9px;margin-bottom:10px;font-size:13px;color:var(--ink-soft);}
-  .article-head b{color:var(--ink);font-weight:700;}
-  .article-body{
-    background:var(--inset);border-radius:var(--r-ctl);
-    padding:16px 18px;font-size:14.5px;line-height:1.95;color:#374151;
-    white-space:pre-wrap;word-break:break-word;
+  .qualities{
+    display:grid;grid-template-columns:repeat(auto-fill,minmax(180px,1fr));
+    gap:12px;margin-top:12px;
   }
-  .article-body.collapsed{
-    max-height:9.2em;overflow:hidden;
-    -webkit-mask-image:linear-gradient(180deg,#000 58%,transparent 100%);
-            mask-image:linear-gradient(180deg,#000 58%,transparent 100%);
+  .q-item{
+    border:1.5px solid var(--line);border-radius:14px;padding:14px;
+    display:flex;flex-direction:column;gap:6px;background:#fff;
+    transition:border-color .15s, box-shadow .15s;
   }
-  .article-toggle{
-    display:block;width:100%;margin-top:10px;padding:10px 0;font-family:inherit;
-    font-size:13px;font-weight:700;color:var(--accent-ink);
-    background:var(--accent-soft);border:none;border-radius:var(--r-ctl);
-    cursor:pointer;transition:background .16s ease;
+  .q-item:hover{box-shadow:0 6px 18px rgba(42,150,88,.14);}
+  .q-item.best{border-color:var(--primary);background:#f2faf5;}
+  /* 「档位名 + 角标」用 flex 排：角标整体成组，放不下时整组换行，
+     既不会把「480P」从中间劈开，也不会让两个角标各自占一行 */
+  .q-label{font-weight:800;font-size:18px;display:flex;align-items:center;flex-wrap:wrap;gap:6px;}
+  .q-name{white-space:nowrap;}
+  .q-tags{display:flex;align-items:center;gap:5px;flex-wrap:wrap;}
+  .q-label i{
+    font-style:normal;font-size:11px;color:#fff;background:var(--primary);
+    border-radius:6px;padding:2px 6px;font-weight:600;white-space:nowrap;
   }
-  .article-toggle:hover{background:#e0e7ff;}
+  .q-info{color:var(--ink-soft);font-size:12.5px;}
+  .dl{
+    margin-top:auto;text-align:center;background:var(--primary);color:#fff;
+    border-radius:10px;padding:9px;font-size:14px;font-weight:700;text-decoration:none;
+    transition:background .15s;
+  }
+  .dl:hover{background:var(--primary-dark);}
+  /* DASH 档位是音视频分离的，必须服务端合并，用另一种颜色区分下载方式 */
+  .q-label i.tag-merge{background:#3a6ea5;}
+  .dl.dl-merge{background:#3a6ea5;}
+  .dl.dl-merge:hover{background:#2f5b89;}
+  .dl.busy{background:#93a3b3;pointer-events:none;cursor:progress;}
+  .dl-hint{font-size:11.5px;color:var(--ink-soft);text-align:center;line-height:1.4;}
+  .dl-error{
+    margin-top:10px;background:#fdecec;border:1px solid #f5c2c2;color:#a3282c;
+    border-radius:10px;padding:9px 12px;font-size:13px;
+  }
 
-  /* ---------- 图文帖 ---------- */
-  .plog{margin-top:26px;}
-  .plog-grid{
-    display:grid;grid-template-columns:repeat(auto-fill,minmax(124px,1fr));
-    gap:11px;margin:12px 0 18px;
-  }
-  /* 图片少时把图版放大：否则一张图会缩在左角、右边空掉一大片，
-     看起来像"没加载全"而不是"这个帖子就只有一张图" */
-  .plog-grid.few{
-    grid-template-columns:repeat(auto-fill,minmax(200px,260px));
-    justify-content:start;
-  }
-  .plog-grid.few .plog-item img{height:196px;}
-  .plog-item{
-    position:relative;margin:0;overflow:hidden;background:var(--inset);
-    border-radius:var(--r-ctl);
-  }
-  .plog-item img{display:block;width:100%;height:132px;object-fit:cover;cursor:zoom-in;}
-  .plog-no{
-    position:absolute;top:7px;left:7px;padding:2px 8px;border-radius:var(--r-pill);
-    font-size:11px;font-weight:700;font-variant-numeric:tabular-nums;
-    background:rgba(17,24,39,.62);color:#fff;
-  }
-  .plog-dl{
-    display:block;padding:9px 0;text-align:center;
-    font-size:12px;font-weight:700;color:var(--accent-ink);background:var(--accent-soft);
-    text-decoration:none;transition:background .16s ease;
-  }
-  .plog-dl:hover{background:#e0e7ff;}
-  .plog-actions{display:flex;gap:10px;flex-wrap:wrap;}
-  .plog-actions .btn{flex:1 1 190px;}
-  .stat-line{margin-top:15px;font-size:12.5px;color:var(--ink-faint);font-variant-numeric:tabular-nums;}
-
-  /* ---------- 弹层 ---------- */
+  /* 弹窗：封面预览 / 扫码登录 */
   .mask{
-    position:fixed;inset:0;z-index:9;padding:20px;
+    position:fixed;inset:0;background:rgba(0,0,0,.78);
     display:flex;align-items:center;justify-content:center;
-    background:rgba(17,24,39,.55);backdrop-filter:blur(3px);
+    z-index:9;padding:20px;
   }
   .mask.zoom{cursor:zoom-out;}
-  .mask.zoom img{max-width:94vw;max-height:90vh;border-radius:var(--r-ctl);box-shadow:var(--sh-2);}
+  .mask.zoom img{max-width:94vw;max-height:90vh;border-radius:10px;}
+
   .qr-box{
-    width:min(372px,94vw);padding:28px 26px 22px;text-align:center;
-    background:var(--surface);border-radius:var(--r-panel);box-shadow:var(--sh-2);
+    background:#fff;border-radius:20px;padding:24px 22px 20px;width:100%;max-width:330px;
+    text-align:center;box-shadow:0 20px 50px rgba(0,0,0,.3);
   }
-  .qr-box h4{margin:0;font-size:16px;font-weight:700;}
-  .qr-sub{margin:8px 0 20px;font-size:12.5px;line-height:1.7;color:var(--ink-soft);}
+  .qr-box h4{margin:0 0 4px;font-size:17px;}
+  .qr-box .qr-sub{color:var(--ink-soft);font-size:12.5px;margin:0 0 16px;}
   .qr-canvas{
-    position:relative;display:inline-block;padding:14px;background:var(--surface);
-    border-radius:var(--r-ctl);box-shadow:inset 0 0 0 1px var(--line);
+    position:relative;width:216px;height:216px;margin:0 auto;
+    border:1px solid var(--line);border-radius:14px;padding:8px;background:#fff;
   }
+  .qr-canvas svg{width:100%;height:100%;display:block;}
   .qr-veil{
-    position:absolute;inset:0;display:flex;flex-direction:column;
-    align-items:center;justify-content:center;border-radius:var(--r-ctl);
-    background:rgba(255,255,255,.95);
+    position:absolute;inset:0;border-radius:14px;background:rgba(255,255,255,.94);
+    display:flex;flex-direction:column;align-items:center;justify-content:center;
+    gap:10px;padding:12px;text-align:center;
   }
-  .qr-veil .txt{font-size:12.5px;line-height:1.7;color:var(--ink-soft);}
-  .qr-veil.ok .txt b{color:var(--bili-ink);}
-  .qr-state{margin-top:18px;min-height:20px;font-size:13px;line-height:1.55;color:var(--ink-soft);}
-  .qr-state.scanned{color:var(--ink);}
-  .qr-state.success{color:var(--bili-ink);font-weight:700;}
-  .qr-state.expired,.qr-state.error{color:var(--alarm);}
-  .qr-actions{display:flex;gap:9px;justify-content:center;margin-top:18px;}
+  .qr-veil .big{font-size:30px;line-height:1;}
+  .qr-veil .txt{font-size:13px;color:var(--ink-soft);line-height:1.6;}
+  .qr-veil .txt b{color:var(--ink);}
+  .qr-veil.ok .big{color:var(--primary);}
+  .qr-state{
+    margin-top:14px;font-size:13.5px;min-height:20px;line-height:1.5;
+  }
+  .qr-state.waiting{color:var(--ink-soft);}
+  .qr-state.scanned{color:#c08a2e;}
+  .qr-state.success{color:var(--primary-dark);font-weight:700;}
+  .qr-state.expired,.qr-state.error{color:#c0564a;}
+  .qr-actions{display:flex;gap:8px;justify-content:center;margin-top:14px;}
   .qr-note{
-    margin:20px 0 0;padding-top:16px;border-top:1px solid var(--line);
-    font-size:11.5px;line-height:1.75;color:var(--ink-faint);text-align:left;
+    margin:16px 0 0;padding-top:12px;border-top:1px solid var(--line);
+    font-size:11.5px;color:var(--ink-soft);line-height:1.7;text-align:left;
   }
   .spin{
-    display:inline-block;width:16px;height:16px;margin-bottom:8px;
-    border:2px solid var(--accent-soft);border-top-color:var(--accent);border-radius:50%;
-    animation:sp .7s linear infinite;
+    display:inline-block;width:15px;height:15px;border:2px solid #d8ebe0;
+    border-top-color:var(--primary);border-radius:50%;
+    animation:sp .7s linear infinite;vertical-align:-3px;margin-right:6px;
   }
   @keyframes sp{to{transform:rotate(360deg);}}
 
-  footer{
-    margin-top:auto;padding-top:18px;border-top:1px solid var(--line);
-    font-size:12px;line-height:1.85;color:var(--ink-faint);
+  /* 图文帖（plog）：图片网格 + 两种下载形式。
+     用网格而不是横滑条——一个帖子常有 9~30 张图，横滑要一路拖。
+     每张图下面挂一个「原图」链接，整帖再给「打包下载」和「下载成视频」两个出口。 */
+  .plog{margin-top:16px;}
+  .plog-grid{
+    display:grid;grid-template-columns:repeat(auto-fill,minmax(118px,1fr));
+    gap:8px;margin:10px 0 14px;
   }
+  .plog-item{
+    margin:0;position:relative;border:1px solid var(--line);border-radius:10px;
+    overflow:hidden;background:#f6fbf8;
+  }
+  .plog-item img{
+    display:block;width:100%;height:128px;object-fit:cover;cursor:zoom-in;
+  }
+  .plog-item .plog-no{
+    position:absolute;top:5px;left:5px;padding:1px 6px;border-radius:999px;
+    background:rgba(0,0,0,.55);color:#fff;font-size:11px;font-weight:600;
+  }
+  .plog-item .plog-dl{
+    display:block;padding:5px 0;text-align:center;font-size:12px;font-weight:600;
+    color:var(--ink-soft);background:#fff;border-top:1px solid var(--line);
+    text-decoration:none;font-family:inherit;
+  }
+  .plog-item .plog-dl:hover{color:var(--primary-dark);background:#f2faf5;}
+  .plog-actions{display:flex;gap:10px;flex-wrap:wrap;}
+  .plog-actions .btn{flex:1 1 190px;}
+  /* 次要按钮：图文帖里两个下载入口并列，主次分明才不会都像"立即下载" */
+  .btn.ghost{
+    background:#fff;color:var(--primary-dark);border:1.5px solid var(--line);box-shadow:none;
+  }
+  .btn.ghost:hover{background:#f2faf5;border-color:#b8e0c8;}
+  .stat-line{color:var(--ink-soft);font-size:12.5px;margin-top:10px;}
+  /* 正文全文（长图文「文章」/ 纯文字帖）。
+     抖音长图文上限 8000 字，直接铺开会把卡片撑到几屏高，
+     所以默认收起成若干行 + 一个「展开全文」，由用户决定要不要读。 */
+  .article{margin-top:12px;}
+  .article-head{
+    display:flex;align-items:baseline;gap:8px;margin-bottom:6px;
+    font-size:13px;color:var(--ink-soft);
+  }
+  .article-head b{color:var(--ink);}
+  .article-count{font-weight:400;}
+  .article-body{
+    background:#f2faf5;border:1px solid #e0f2e7;border-radius:12px;
+    padding:12px 14px;font-size:14px;line-height:1.9;
+    white-space:pre-wrap;word-break:break-word;
+  }
+  .article-body.collapsed{
+    max-height:8.8em;overflow:hidden;
+    /* 底部渐隐，暗示"还有内容" */
+    -webkit-mask-image:linear-gradient(180deg,#000 62%,transparent 100%);
+    mask-image:linear-gradient(180deg,#000 62%,transparent 100%);
+  }
+  .article-toggle{
+    display:block;width:100%;margin-top:6px;padding:7px 0;font-family:inherit;
+    font-size:13px;font-weight:600;color:var(--primary-dark);
+    background:#fff;border:1.5px solid var(--line);border-radius:10px;cursor:pointer;
+    transition:background .15s, border-color .15s;
+  }
+  .article-toggle:hover{background:#f2faf5;border-color:#b8e0c8;}
 
-  /* ---------- 窄屏 ---------- */
-  @media (max-width:560px){
-    .wrap{padding:0 18px 60px;}
-    header{padding:20px 0 0;}
-    .hero{padding:34px 0 22px;}
+  footer{text-align:center;color:var(--ink-soft);font-size:12px;margin-top:8px;line-height:1.8;}
+
+  @media (max-width:480px){
     .input-row{flex-direction:column;}
-    .input-row .btn{width:100%;}
-    .card{padding:20px;border-radius:18px;}
-    /* 窄屏把封面与文字改回上下堆叠 */
-    .head{grid-template-columns:1fr;gap:18px;}
-    .cover{max-height:240px;}
-    .supports-list{grid-template-columns:1fr;gap:4px 0;}
-    .supports-list dt{margin-top:10px;}
-    .hints{grid-template-columns:1fr;}
-    .q-item{flex-direction:column;align-items:stretch;gap:13px;}
-    .q-side{justify-content:space-between;}
-    .plog-grid{grid-template-columns:repeat(auto-fill,minmax(102px,1fr));}
-    .meta{gap:4px 18px;}
-  }
-
-  /* 质量底线：尊重系统的「减少动态效果」 */
-  @media (prefers-reduced-motion: reduce){
-    *{transition-duration:.01ms !important;animation-duration:.01ms !important;}
+    .btn{width:100%;}
+    .qualities{grid-template-columns:1fr 1fr;}
+    .login-bar{font-size:12.5px;}
   }
 </style>
 </head>
@@ -493,81 +381,41 @@
 <div id="app" class="booting">
   <div class="wrap">
     <header>
-      <svg class="mark" viewBox="0 0 34 34" aria-hidden="true">
-        <rect width="34" height="34" rx="9" fill="#4f46e5"/>
-        <rect x="9" y="9" width="6" height="16" rx="2" fill="#ffffff"/>
-        <rect x="19" y="9" width="6" height="16" rx="2" fill="#c7d2fe"/>
-      </svg>
-      <p class="brand">抖音、哔哩哔哩 下载</p>
+      <h1>📥 视频下载站</h1>
+      <p class="sub">抖音 · 哔哩哔哩 ｜ 粘贴分享链接，自动识别平台，保存原画质视频</p>
     </header>
 
-    <section class="hero" :class="{ compact: !!result }">
-      <h1>粘贴链接，取回原片</h1>
-      <p class="lede">视频不重编码，图文取无水印原图。</p>
-    </section>
-
-    <section class="composer">
+    <section class="card">
       <div class="input-row">
         <input v-model.trim="url" :placeholder="ph.placeholder" @input="autoDetect" @keyup.enter="parse()">
-        <button class="btn" :disabled="loading" @click="parse()">{{ loading ? '取回中…' : '取回' }}</button>
+        <button class="btn" :disabled="loading" @click="parse()">{{ loading ? '解析中…' : '开始解析' }}</button>
       </div>
-
-      <!-- ★ 交界带：本页唯一的浓烈时刻。静默时是一条中性色带，
-           一旦识别出平台就整条填成该平台的颜色——把产品最有个性的动作
-           （自动识别）变成视觉事件。别处抄不走，因为它长在行为上。 -->
-      <p class="band" :class="{ on: !!bandKind, bili: bandKind === 'bilibili' }">
-        <span class="band-mark"></span>
-        <span>{{ bandText }}</span>
+      <p v-if="detected" class="detect" :class="{ bili: detected === 'bilibili' }">
+        <span>已自动识别：{{ detected === 'bilibili' ? '📺 哔哩哔哩' : '🎵 抖音' }}</span>
       </p>
-
-      <p v-if="error" class="error">{{ error }}</p>
-      <!-- 空状态不留一大片空白：把「能粘什么、能得到什么」摆出来。
-           这既填住了版面，也真的在帮用户判断该粘什么东西进来。 -->
-      <section class="supports" v-if="!result">
-        <h3>支持的内容</h3>
-        <dl class="supports-list">
-          <div><dt>抖音视频</dt><dd>多档清晰度，原画质不重编码</dd></div>
-          <div><dt>抖音图文</dt><dd>无水印原图；可打包成 zip，也可合成为视频</dd></div>
-          <div><dt>抖音长图文</dt><dd>几千字全文可直接在页面上展开阅读</dd></div>
-          <div><dt>抖音纯文字帖</dt><dd>正文完整展示（没有媒体文件可下）</dd></div>
-          <div><dt>哔哩哔哩视频</dt><dd>多分P可切换；1080P 及以上需登录账号</dd></div>
-          <div><dt>哔哩哔哩番剧</dt><dd>整季选集；会员专享集会明确标注</dd></div>
-        </dl>
-        <!-- 原来这里是挤成一整行的格式说明，读起来很累；拆成要点更好扫 -->
-        <ul class="hints">
-          <li>抖音「复制链接」得到的<strong>整段文案</strong>可以直接粘，会自动从中抽出链接</li>
-          <li>B 站除了链接，<strong>裸编号</strong>也能识别：BV…、av…、番剧 ep… / ss… / md…</li>
-          <li>视频直链有时效，下载失败时<strong>重新解析一次</strong>即可</li>
-        </ul>
-      </section>
+      <p v-else-if="url" class="detect none"><span>未能识别平台，将按抖音尝试解析</span></p>
+      <p v-if="error" class="error">⚠️ {{ error }}</p>
+      <p class="tip">{{ ph.tip }}</p>
     </section>
 
     <section v-if="result" class="card">
-      <!-- 封面与文字并排：宽屏下不再让封面孤零零占一行、右边空掉一大片。
-           图文帖仍然不显示封面——下面的图片网格已经把每张图都铺出来了。 -->
-      <div class="head" :class="{ solo: !coverSrc || isImages }">
-        <div class="cover-wrap" v-if="coverSrc && !isImages">
-          <img :src="coverSrc" class="cover" alt="视频封面" @click="preview = coverSrc">
-        </div>
-        <div class="head-main">
-          <h2 class="title">
-            <span class="badge" :class="{ bili: isBili }">{{ kindLabel }}</span>
-            {{ result.title }}
-          </h2>
-          <dl class="meta">
-            <div><dt>作者</dt><dd>{{ result.author }}</dd></div>
-            <div v-if="result.duration_text"><dt>时长</dt><dd>{{ result.duration_text }}</dd></div>
-            <div v-if="isImages"><dt>图片</dt><dd>{{ result.images.length }} 张</dd></div>
-            <div><dt>编号</dt><dd>{{ result.video_id }}</dd></div>
-          </dl>
-          <!-- 简介。注意长图文（抖音「文章」，上限 8000 字）会被 summary 截到 100 字，
-               所以下面必须配一个可展开的正文块，否则用户根本读不到文章。 -->
-          <div class="summary" v-if="!isText"><b>内容简介：</b>{{ result.summary }}</div>
-        </div>
+      <!-- 图文帖不单独显示封面：下面的图片网格已经把每张图都铺出来了 -->
+      <div class="cover-wrap" v-if="coverSrc && !isImages">
+        <img :src="coverSrc" class="cover" alt="视频封面" @click="preview = coverSrc">
       </div>
-
-      <!-- 互动数据：有就显示，没有（如 B 站侧）整行不出现 -->
-      <p class="stat-line" v-if="statText">{{ statText }}</p>
+      <h2 class="title">
+        <span class="badge" :class="{ bili: isBili }">{{ kindLabel }}</span>
+        {{ result.title }}
+      </h2>
+      <div class="meta">
+        <span>👤 {{ result.author }}</span>
+        <span v-if="result.duration_text">⏱ {{ result.duration_text }}</span>
+        <span v-if="isImages">🖼 {{ result.images.length }} 张图片</span>
+        <span>🆔 {{ result.video_id }}</span>
+      </div>
+      <!-- 简介。注意长图文（抖音「文章」，上限 8000 字）会被 summary 截到 100 字，
+           所以下面必须配一个可展开的正文块，否则用户根本读不到文章。 -->
+      <div class="summary" v-if="!isText"><b>内容简介：</b>{{ result.summary }}</div>
 
       <!-- 正文全文。抖音的长图文把完整正文放在 desc 里（实测 2498 字，结尾带作者署名），
            不是另开字段，所以直接用 desc 即可。纯文字帖默认展开，其余默认收起。 -->
@@ -624,29 +472,29 @@
            而不是让用户点了才失败——与 DASH 档位的处理一致。 -->
       <div class="plog" v-if="isImages">
         <h3>图片（共 {{ result.images.length }} 张）</h3>
-        <div class="plog-grid" :class="{ few: result.images.length <= 3 }">
+        <div class="plog-grid">
           <figure class="plog-item" v-for="im in result.images" :key="im.index">
             <span class="plog-no">{{ im.index }}</span>
             <img :src="imgSrc(im)" :alt="'第' + im.index + '张'" loading="lazy"
                  @click="preview = imgSrc(im)">
             <a class="plog-dl" :href="imgDownloadUrl(im)" :download="imgName(im)"
-               :title="'下载第 ' + im.index + ' 张原图'">原图</a>
+               :title="'下载第 ' + im.index + ' 张原图'">⬇ 原图</a>
           </figure>
         </div>
 
-        <div v-if="dlError" class="dl-error">{{ dlError }}</div>
+        <div v-if="dlError" class="dl-error">⚠️ {{ dlError }}</div>
 
         <div class="plog-actions">
           <button class="btn ghost" :disabled="!!busyKey" @click="downloadZip">
-            {{ busyKey === 'zip' ? '打包中…' : '打包下载全部（zip）' }}
+            {{ busyKey === 'zip' ? '⏳ 打包中…' : '🗂 打包下载全部（zip）' }}
           </button>
           <button class="btn" v-if="canSlideshow" :disabled="!!busyKey" @click="downloadSlideshow">
-            {{ busyKey === 'slideshow' ? '合成中…' : '下载成视频' }}
+            {{ busyKey === 'slideshow' ? '⏳ 合成中…' : '🎬 下载成视频' }}
           </button>
         </div>
         <p class="tip">
           每张图都下载<strong>无水印原图</strong>（抖音另有一套带「抖音号」水印的地址，已刻意不用）。
-          打包的 zip 里还会附一份<strong>文案 Word</strong>（文案.docx，含标题、作者、全文与来源）。
+          打包的 zip 里还会附一份<strong>文案 Word</strong>（<code>文案.docx</code>，含标题、作者、全文与来源）。
           <template v-if="canSlideshow">
             合成的视频是<strong>无声幻灯片</strong>——抖音不提供图文帖的背景音乐。
           </template>
@@ -654,13 +502,14 @@
             服务器未安装 ffmpeg，暂时无法合成视频，可先用打包下载。
           </template>
         </p>
+        <p class="stat-line" v-if="statText">{{ statText }}</p>
       </div>
 
       <!-- 本集下不了时的说明（会员专享 / 地区限制）。
            刻意不把它做成弹窗或错误：标题、封面、选集都还是好的，
            用户需要的是「为什么下不了、怎么才能下」而不是一个红叉。 -->
       <div v-if="result.unavailable" class="locked-note">
-        <b>本集暂不可下载</b><br>{{ result.unavailable.message }}
+        <b>🔒 本集暂不可下载</b><br>{{ result.unavailable.message }}
       </div>
 
       <!-- B 站登录状态条 -->
@@ -689,7 +538,7 @@
           {{ diag.loading ? '诊断中…' : '画质诊断' }}
         </button>
       </div>
-      <p v-if="isBili && login.notice" class="tip">{{ login.notice }}</p>
+      <p v-if="isBili && login.notice" class="tip">⚠️ {{ login.notice }}</p>
 
       <!-- 画质诊断结果 -->
       <div v-if="diag.data" class="diag">
@@ -725,41 +574,26 @@
       </div>
 
       <template v-if="(result.qualities || []).length">
-        <h3>选择清晰度</h3>
+        <h3>选择清晰度下载</h3>
         <p class="muted" v-if="mergeCount">
           其中 {{ mergeCount }} 个高清档位（1080P60 / 4K / HDR 等）原始形态是音视频分离的，
           由服务器合并后输出完整 MP4，点击后请耐心等待。
         </p>
-        <div v-if="dlError" class="dl-error">{{ dlError }}</div>
+        <div v-if="dlError" class="dl-error">⚠️ {{ dlError }}</div>
         <div class="qualities">
         <div v-for="q in result.qualities" :key="q.key" class="q-item" :class="{ best: q.best }">
-          <div class="q-main">
-            <div class="q-label">
-              <span class="q-name">{{ q.label }}</span>
-              <span class="q-tags" v-if="q.best || q.needs_merge">
-                <i v-if="q.best">最高</i><i v-if="q.needs_merge" class="tag-merge">需合并</i>
-              </span>
-            </div>
-            <!-- 编码 / 分辨率 / 备注各自成格，靠间距分列——不用「·」拼接 -->
-            <div class="q-info">
-              <span>{{ q.codec }}</span>
-              <template v-if="q.note"><span>{{ q.note }}</span></template>
-              <template v-if="q.width"><span>{{ q.width }}×{{ q.height }}</span></template>
-            </div>
-            <div v-if="q.needs_merge" class="dl-hint">服务器合并音视频，大文件需数十秒</div>
-            <!-- 体积对比条：一眼看出各档位的大小差距，而不是逐个读数字。
-               宽度按本视频内最大档位归一化，只用于横向比较。 -->
-            <div class="q-bar" v-if="maxQSize && q.size_bytes">
-              <span :style="{ width: sizeBar(q) + '%' }"></span>
-            </div>
+          <div class="q-label">
+            <span class="q-name">{{ q.label }}</span>
+            <span class="q-tags" v-if="q.best || q.needs_merge">
+              <i v-if="q.best">最高画质</i><i v-if="q.needs_merge" class="tag-merge">音视频合并</i>
+            </span>
           </div>
-          <div class="q-side">
-            <span class="q-size">{{ q.size_text }}</span>
-            <a class="dl" :class="{ 'dl-merge': q.needs_merge, busy: busyKey === q.key }"
-               :href="downloadUrl(q)" @click="onDownload($event, q)">
-              {{ busyKey === q.key ? '合并中…' : (q.needs_merge ? '合并并下载' : '下载') }}
-            </a>
-          </div>
+          <div class="q-info">{{ q.size_text }} · {{ q.codec }}<template v-if="q.note"> · {{ q.note }}</template><template v-if="q.width"> · {{ q.width }}×{{ q.height }}</template></div>
+          <div v-if="q.needs_merge" class="dl-hint">服务器合并音视频，大文件需数十秒</div>
+          <a class="dl" :class="{ 'dl-merge': q.needs_merge, busy: busyKey === q.key }"
+             :href="downloadUrl(q)" @click="onDownload($event, q)">
+            {{ busyKey === q.key ? '⏳ 合并中…' : (q.needs_merge ? '⬇ 合并并下载' : '⬇ 下载视频') }}
+          </a>
         </div>
         </div>
       </template>
@@ -789,18 +623,20 @@
           <span class="spin"></span>
           <div class="txt">正在获取二维码…</div>
         </div>
-        <!-- 遮罩里不再放表情/符号当图标：下面的文字已经说清楚了，
-             多一个大图标只是噪音。 -->
         <div v-else-if="qr.status === 'expired'" class="qr-veil">
+          <div class="big">⏱</div>
           <div class="txt">二维码已失效<br>请点击下方刷新</div>
         </div>
         <div v-else-if="qr.status === 'error'" class="qr-veil">
+          <div class="big">⚠️</div>
           <div class="txt">二维码获取失败<br>请点击下方重试</div>
         </div>
         <div v-else-if="qr.status === 'success'" class="qr-veil ok">
+          <div class="big">✓</div>
           <div class="txt"><b>登录成功</b><br>正在刷新画质列表…</div>
         </div>
         <div v-else-if="!qr.svg" class="qr-veil">
+          <div class="big">⚠️</div>
           <div class="txt">二维码渲染失败<br>请刷新页面重试</div>
         </div>
       </div>
@@ -833,9 +669,9 @@ const { createApp, ref, computed } = Vue;
 // 这里的判定顺序必须与后端 main.py 的 _detect_platform 保持一致，
 // 否则会出现「前端提示哔哩哔哩、实际却按抖音解析」的错位。
 const PH = {
-  placeholder: '粘贴分享链接，或整段分享文案',
-  tip: '支持抖音短链与整段分享文案；B 站 b23.tv 短链、BV / av 号、番剧 ep / ss / md 号。多分P与番剧集数解析后可切换。',
-  empty: '请先粘贴分享链接',
+  placeholder: '粘贴抖音 / 哔哩哔哩 分享链接，自动识别平台',
+  tip: '支持抖音短链 v.douyin.com 及「复制链接」得到的整段分享文字；支持 B 站 b23.tv 短链、bilibili.com/video/BV… 长链、裸 BV / av 号，多分P视频解析后可切换选集；也支持 B 站番剧（bangumi/play/ep… 或 ss… / md…），解析后可切换集数',
+  empty: '请先粘贴视频分享链接',
 };
 
 // 轮询间隔：B 站官方建议 2~3 秒，再快也没有意义
@@ -888,16 +724,6 @@ createApp({
     const diag = ref({ loading: false, data: null, rows: [], dashRows: [] });
     let pollTimer = null;
 
-    // 交界带（输入框下方那条色带）：静默 → 识别到平台就整条上色。
-    // 它独自承担「这是哪个平台」这个信息，所以页面别处不再重复表达。
-    const bandKind = computed(() => detected.value || '');
-    const bandText = computed(() => {
-      if (detected.value === 'bilibili') return '识别为哔哩哔哩';
-      if (detected.value === 'douyin') return '识别为抖音';
-      if (url.value) return '识别不出平台，会按抖音试一次';
-      return '粘贴后自动识别平台';
-    });
-
     const isBili = computed(() => !!result.value && result.value.platform === 'bilibili');
     // 番剧（PGC）与普通投稿（UGC）的选集方式完全不同，前端据此切换 UI
     const isBangumi = computed(() => !!result.value && result.value.kind === 'bangumi');
@@ -930,11 +756,11 @@ createApp({
     const statText = computed(() => {
       const s = (result.value && result.value.stats) || {};
       const parts = [];
-      if (s.digg_count) parts.push('点赞 ' + s.digg_count);
-      if (s.collect_count) parts.push('收藏 ' + s.collect_count);
-      if (s.comment_count) parts.push('评论 ' + s.comment_count);
-      if (s.share_count) parts.push('分享 ' + s.share_count);
-      return parts.join('　');
+      if (s.digg_count) parts.push('❤ ' + s.digg_count);
+      if (s.collect_count) parts.push('⭐ ' + s.collect_count);
+      if (s.comment_count) parts.push('💬 ' + s.comment_count);
+      if (s.share_count) parts.push('↗ ' + s.share_count);
+      return parts.length ? '互动数据：' + parts.join('　') : '';
     });
     const topQuality = computed(() => {
       const qs = (result.value && result.value.qualities) || [];
@@ -1022,19 +848,6 @@ createApp({
       const qs = (result.value && result.value.qualities) || [];
       return qs.filter(q => q.needs_merge).length;
     });
-
-    // 体积对比条：按本视频内**最大档位**归一化，只用于横向比较各档大小。
-    // 不同视频之间没有可比性（时长不同），所以不能用绝对值。
-    const maxQSize = computed(() => {
-      const qs = (result.value && result.value.qualities) || [];
-      return qs.reduce((m, q) => Math.max(m, q.size_bytes || 0), 0);
-    });
-
-    function sizeBar(q) {
-      if (!maxQSize.value || !q.size_bytes) return 0;
-      // 下限 8%：最小的档位缩成一条看不见的线就失去意义了
-      return Math.max(8, Math.round((q.size_bytes / maxQSize.value) * 100));
-    }
 
     function downloadName(q) {
       const base = result.value;
@@ -1387,7 +1200,6 @@ createApp({
     return {
       url, loading, error, result, preview, ph, isBili, isBangumi, coverSrc, avatarSrc,
       topQuality, login, qr, diag, busyKey, dlError, mergeCount, detected,
-      bandKind, bandText, maxQSize, sizeBar,
       autoDetect, parse, selectPage, selectEpisode, selectSeason, downloadUrl, onDownload,
       openQr, closeQr, logoutBili, runDiag,
       // 图文帖（plog）/ 纯文字帖
