@@ -115,6 +115,17 @@
   .input-row input::placeholder{color:var(--ink-faint);}
   .input-row input:focus{box-shadow:var(--sh-1), 0 0 0 3px var(--accent-soft);}
 
+  /* 「粘贴」是次要动作，用 ghost 款——主色只留给「取回」，别让两个实心按钮打架 */
+  .input-actions{display:flex;gap:10px;}
+  .btn.paste{display:inline-flex;align-items:center;gap:7px;padding:16px 20px;box-shadow:none;}
+  .btn .ico{width:15px;height:15px;flex:0 0 auto;}
+
+  /* 粘贴失败时的说明（不是错误，用中性灰，避免和解析失败的红框混淆） */
+  .paste-msg{
+    margin:14px 0 0;padding:10px 14px;border-radius:var(--r-ctl);
+    font-size:13px;line-height:1.7;color:var(--ink-soft);background:var(--inset);
+  }
+
   /* ---------- 识别状态：一枚浅底胶囊，不是整条色块。
        上一版那条贯穿全宽的实心黑带太钝，这里改成克制的信息标签。 ---------- */
   .band{
@@ -469,7 +480,11 @@
     header{padding:20px 0 0;}
     .hero{padding:34px 0 22px;}
     .input-row{flex-direction:column;}
-    .input-row .btn{width:100%;}
+    /* 窄屏：输入框占一行，按钮并排占一行（不再各占一整行，省一屏高度）。
+       用 grid 而不是 flex:1 —— 实测 flex:1 下两个按钮宽度不等（160/184），
+       因为「粘贴」多一个图标、两个按钮的 padding 也不同；grid 按列分配才严格等宽。
+       auto-columns 而非写死两列：HTTP 环境下「粘贴」不渲染，剩下「取回」也该占满整行。 */
+    .input-actions{display:grid;grid-auto-flow:column;grid-auto-columns:1fr;}
     .card{padding:20px;border-radius:18px;}
     /* 窄屏把封面与文字改回上下堆叠 */
     .head{grid-template-columns:1fr;gap:18px;}
@@ -509,8 +524,23 @@
     <section class="composer">
       <div class="input-row">
         <input v-model.trim="url" :placeholder="ph.placeholder" @input="autoDetect" @keyup.enter="parse()">
-        <button class="btn" :disabled="loading" @click="parse()">{{ loading ? '取回中…' : '取回' }}</button>
+        <div class="input-actions">
+          <!-- 只在真读得到剪贴板时才出现：HTTP 访问下 navigator.clipboard 是 undefined，
+               摆一个点了没反应的按钮比不摆更糟。 -->
+          <button v-if="canPaste" class="btn ghost paste" :disabled="loading"
+                  title="把剪贴板里的链接填进输入框" @click="pasteLink()">
+            <svg class="ico" viewBox="0 0 16 16" aria-hidden="true">
+              <rect x="3.2" y="2.6" width="9.6" height="12.4" rx="2"
+                    fill="none" stroke="currentColor" stroke-width="1.5"/>
+              <rect x="6" y="1.2" width="4" height="2.6" rx="1.3" fill="currentColor"/>
+            </svg>
+            粘贴
+          </button>
+          <button class="btn" :disabled="loading" @click="parse()">{{ loading ? '取回中…' : '取回' }}</button>
+        </div>
       </div>
+
+      <p v-if="pasteMsg" class="paste-msg">{{ pasteMsg }}</p>
 
       <!-- ★ 交界带：本页唯一的浓烈时刻。静默时是一条中性色带，
            一旦识别出平台就整条填成该平台的颜色——把产品最有个性的动作
@@ -956,6 +986,36 @@ createApp({
       detected.value = detectPlatform(url.value);
     }
 
+    // ------------------------------------------------------ 粘贴按钮
+    // 读剪贴板只在**安全上下文**（HTTPS 或 localhost）下可用：用 HTTP + IP 访问时
+    // navigator.clipboard 直接是 undefined，调用只会抛错。所以按能力决定渲不渲染这个按钮，
+    // 而不是摆一个点了没反应的按钮出去。
+    const canPaste = !!(navigator.clipboard && navigator.clipboard.readText);
+    const pasteMsg = ref('');        // 粘贴失败时的临时说明
+    let pasteTimer = null;
+
+    function flashPaste(msg) {
+      pasteMsg.value = msg;
+      clearTimeout(pasteTimer);
+      pasteTimer = setTimeout(() => { pasteMsg.value = ''; }, 6000);
+    }
+
+    async function pasteLink() {
+      try {
+        // readText 必须在**本轮用户手势里直接调用**（前面不能先 await 别的），
+        // 否则 Safari / Firefox 会以「非用户触发」为由拒绝。
+        const text = ((await navigator.clipboard.readText()) || '').trim();
+        if (!text) { flashPaste('剪贴板里没有文字'); return; }
+        url.value = text;          // 整段分享文案照收，后端会自己把链接抽出来
+        autoDetect();
+        clearTimeout(pasteTimer);
+        pasteMsg.value = '';
+      } catch (e) {
+        // 权限被拒 / 页面失焦 / 浏览器不支持，都只能请用户手动粘贴
+        flashPaste('浏览器没有允许读取剪贴板，请手动粘贴（Ctrl / ⌘ + V）');
+      }
+    }
+
     // page = 普通视频的分P；ep = 番剧的单集号。两者互斥，只会传一个。
     // 番剧切集必须**重新解析**：一季可能有几十上百集，把每一集的画质都探一遍会发出
     // 成百上千次请求，必然被风控拦。服务端只探当前这一集，切集由前端再发一次请求。
@@ -1389,6 +1449,7 @@ createApp({
       topQuality, login, qr, diag, busyKey, dlError, mergeCount, detected,
       bandKind, bandText, maxQSize, sizeBar,
       autoDetect, parse, selectPage, selectEpisode, selectSeason, downloadUrl, onDownload,
+      canPaste, pasteMsg, pasteLink,
       openQr, closeQr, logoutBili, runDiag,
       // 图文帖（plog）/ 纯文字帖
       isImages, isText, kindLabel, canSlideshow, statText, hasFullText, articleOpen,

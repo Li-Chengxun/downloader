@@ -270,7 +270,7 @@ def build_docx(title: str, author: str = "", desc: str = "",
     """把图文帖的文案生成一份 .docx 的字节内容。
 
     **为什么手写 OOXML 而不是用 python-docx**：本项目 ``requirements.txt`` 是用
-    精确版本锁定的，历史上还吃过依赖解析爆炸的亏（见 README 常见问题 17）。
+    精确版本锁定的，历史上还吃过依赖解析爆炸的亏（见 README 常见问题 15）。
     为一个「导出文案」的小功能新增依赖、还得跟着重建镜像，不划算。
     docx 本质就是 zip + 几个固定 XML，而这里只用到最基础的段落与文字格式，手写完全可控。
 
