@@ -20,8 +20,8 @@
 * 画质逐档请求：``support_formats`` / ``accept_quality`` 会列出「理论上支持」的档位
   （含当前账号拿不到的 1080P），照它列清单会让用户点了 1080P 却下载到 720P。
   所以这里逐档真实请求，**只保留接口真的返回了的档位**，拿不到的不列出来。
-* ⚠️ 登录 ≠ 解锁高画质：实测**非大会员账号登录后仍封顶 720P**，1080P / 1080P60 /
-  4K / HDR 全部需要大会员。前端文案据此写得比较克制，避免用户白期待。
+* 标准 1080P 可由普通登录账号获取；更高档位以账号权益与片源为准。
+  MP4 接口可能降档，而 DASH 仍下发更高清流，不能据此推断账号画质上限。
   用 ``debug_qualities()`` 可以一次性看清「凭据是否生效 / 是否大会员 / 视频真实上限」。
 * 需要更高画质时有两种取凭据的方式：
 
@@ -77,6 +77,8 @@ from typing import Any, Dict, List, Optional
 from urllib.parse import urlparse
 
 import httpx
+import media_http
+import resource_limits as limits
 
 # ffmpeg 的定位与探测放在共享模块里——抖音图文帖合成幻灯片视频也依赖同一套逻辑
 # （含 WinGet 0 字节 shim 那类坑）。这里重新导出，保持 ``bili.ffmpeg_path`` /
@@ -1204,27 +1206,25 @@ async def _download_stream(urls: List[str], dest: Path, cookie: str = "") -> Non
     """把一条流下载到本地文件。任一个地址成功即返回。"""
     if not urls:
         raise ParseError("视频流地址为空")
-    client = _ensure_client()
-    # CDN 校验防盗链只看 Referer，但带上设备指纹更接近真实播放器的请求
+    # CDN 防盗链只需要 Referer，账号 Cookie 不应发给 CDN 或其跳转目标。
     headers = _browser_headers()
-    jar = await request_cookie(cookie)
-    if jar:
-        headers["Cookie"] = jar
     last = "未知错误"
-    for u in urls:
-        try:
-            async with client.stream("GET", u, headers=headers) as r:
-                if r.status_code != 200:
-                    last = f"HTTP {r.status_code}"
-                    continue
-                with open(dest, "wb") as f:
-                    async for chunk in r.aiter_bytes(1 << 16):
-                        f.write(chunk)
-            if dest.exists() and dest.stat().st_size > 0:
-                return
-            last = "响应为空"
-        except httpx.HTTPError as e:
-            last = type(e).__name__
+    async with media_http.media_client(headers=headers,
+                                       timeout=httpx.Timeout(20, read=60)) as client:
+        for u in urls:
+            try:
+                async with media_http.media_stream(client, u) as r:
+                    if r.status_code != 200:
+                        last = f"HTTP {r.status_code}"
+                        continue
+                    size = await media_http.save_media(r, dest, limits.MAX_STREAM_BYTES)
+                if size:
+                    return
+                last = "响应为空"
+            except media_http.MediaTooLarge as exc:
+                raise ParseError(str(exc)) from exc
+            except (httpx.HTTPError, media_http.UnsafeURL) as exc:
+                last = type(exc).__name__
     raise ParseError(f"音视频流下载失败（{last}），直链可能已过期，请重新解析")
 
 
@@ -1246,7 +1246,10 @@ async def _run_ffmpeg(ff: str, vpath: Path, apath: Path, out: Path) -> None:
     except OSError as e:
         raise ParseError(f"无法启动 ffmpeg：{e}") from e
 
-    _, err = await proc.communicate()
+    try:
+        _, err = await limits.communicate_process(proc)
+    except asyncio.TimeoutError as exc:
+        raise ParseError("音视频合并超时，请稍后重试") from exc
     if proc.returncode != 0 or not out.exists() or out.stat().st_size == 0:
         detail = (err or b"").decode("utf-8", "ignore").strip().splitlines()
         raise ParseError("音视频合并失败" + (f"：{detail[-1][:200]}" if detail else ""))
@@ -1295,7 +1298,7 @@ async def build_dash_file(bvid: str = "", cid: int = 0, qn: int = 0, codecid: in
             except OSError:
                 pass
         return out
-    except Exception:
+    except BaseException:
         cleanup_dir(tmpdir)
         raise
 
@@ -1324,6 +1327,24 @@ def _cookie_source(session_cookie: str) -> str:
     if session_cookie:
         return "session(访客扫码)"
     return "env(BILI_COOKIE)" if BILI_COOKIE else "none(未登录)"
+
+
+def _quality_verdict(mp4_max: int, dash: Dict[str, Any], server_ffmpeg: bool) -> str:
+    """Explain actual returned streams, rather than inferring a ceiling from VIP status."""
+    dash_max = max(dash.get("video_qualities") or [0])
+    available_max = max(mp4_max, dash_max if server_ffmpeg else 0)
+    label = lambda q: _quality_label(q)[0] if q else "—"
+    if dash_max > mp4_max:
+        if not server_ffmpeg:
+            return (f"登录凭据已生效，平台已下发 {label(dash_max)} 的音视频分离流，"
+                    f"但当前服务未检测到可运行的 ffmpeg，下载列表最高为 {label(mp4_max)}。"
+                    "安装或配置 ffmpeg 后重新解析即可显示这些档位。")
+        return (f"登录凭据已生效，最高可下载 {label(available_max)}。"
+                "该档位为音视频分离流，下载时由服务端合并。")
+    if available_max:
+        return (f"登录凭据已生效，当前接口实际提供的最高档位为 {label(available_max)}。"
+                "普通账号也可获取平台提供的标准 1080P；更高档位以账号权益与片源为准。")
+    return "登录凭据已生效，但没有获取到可下载的完整流，请查看下方接口结果。"
 
 
 async def debug_bangumi(raw: str, ep: Optional[int] = None,
@@ -1384,6 +1405,7 @@ async def debug_bangumi(raw: str, ep: Optional[int] = None,
         "cookie_len": len(resolve_cookie(cookie)),
         "fingerprint": await _fingerprint_report(),
         "nav": await fetch_nav(cookie),
+        "server_ffmpeg": dash_supported(),
         "mp4_probe": [],
     }
 
@@ -1441,11 +1463,9 @@ async def debug_bangumi(raw: str, ep: Optional[int] = None,
               if p.get("quality_got") and not (p.get("is_preview") == 1 or p.get("truncated"))]
     mp4_max = max([p.get("quality_got") or 0 for p in mp4_ok] or [0])
     dash = out.get("dash") or {}
-    dash_meta_max = max(dash.get("accept_quality") or [0])
     label = lambda q: _quality_label(q)[0] if q else "—"   # noqa: E731
     nav = out["nav"]
     logged_in = bool(nav.get("is_login"))
-    is_vip = bool(nav.get("vip"))
 
     if preview_rows and mp4_max == 0:
         out["verdict"] = (
@@ -1460,14 +1480,8 @@ async def debug_bangumi(raw: str, ep: Optional[int] = None,
             f"当前未登录，最高只能下 {label(mp4_max)}。"
             "番剧的会员集在未登录时只能拿到试看片段，登录大会员后可下载完整正片。"
         )
-    elif not is_vip:
-        out["verdict"] = (
-            f"凭据已生效（{nav.get('name')}，非大会员），最高只能下 {label(mp4_max)}。"
-            "1080P 及以上需大会员。"
-            + (f" 该集最高有 {label(dash_meta_max)}，开通大会员后即可解锁。" if dash_meta_max > mp4_max else "")
-        )
     else:
-        out["verdict"] = f"一切正常，凭据已生效（大会员），最高可下 {label(mp4_max)}"
+        out["verdict"] = _quality_verdict(mp4_max, dash, out["server_ffmpeg"])
     return out
 
 
@@ -1525,6 +1539,7 @@ async def debug_qualities(raw: str, page: Optional[int] = None,
         "cid": cid,
         "title": (meta.get("title") or "")[:60],
         "duration_sec": int(cur.get("duration") or meta.get("duration") or 0),
+        "server_ffmpeg": dash_supported(),
         "cookie_source": _cookie_source(session_cookie),
         "cookie_len": len(resolve_cookie(cookie)),
         # 把设备指纹的状态也报出来：排查 412 时，第一件要确认的就是「指纹到底拿到没有」。
@@ -1577,13 +1592,10 @@ async def debug_qualities(raw: str, page: Optional[int] = None,
 
     # 3) 给出人话结论
     dash = out.get("dash") or {}
-    dash_max = max(dash.get("video_qualities") or [0])
-    dash_meta_max = max(dash.get("accept_quality") or [0])
     mp4_max = max([p.get("quality_got") or 0 for p in out["mp4_probe"]] or [0])
     label = lambda q: _quality_label(q)[0] if q else "—"   # noqa: E731
     nav = out["nav"]
     logged_in = bool(nav.get("is_login"))
-    is_vip = bool(nav.get("vip"))
 
     if not logged_in:
         if out["cookie_source"].startswith("none"):
@@ -1593,30 +1605,20 @@ async def debug_qualities(raw: str, page: Optional[int] = None,
             )
         else:
             out["verdict"] = "凭据已失效或未生效（nav 显示未登录），请退出后重新扫码"
-    elif not is_vip:
-        # 这是最常见的情形：账号有效、但非大会员
-        out["verdict"] = (
-            f"凭据已生效（{nav.get('name')}，非大会员），最高只能下 {label(mp4_max)}。"
-            "B 站对非大会员账号封顶 720P：1080P / 1080P60 / 4K / HDR 均需大会员。"
-            + (f" 该视频最高有 {label(dash_meta_max)}，开通大会员后即可解锁。" if dash_meta_max > mp4_max else "")
-        )
-    elif mp4_max >= 80:
-        out["verdict"] = f"一切正常，凭据已生效，最高可下 {label(mp4_max)}"
-    elif dash_max > mp4_max or dash_meta_max > mp4_max:
-        out["verdict"] = (
-            f"凭据已生效（大会员），但 MP4 格式只给到 {label(mp4_max)}；"
-            f"该视频还有 {label(max(dash_max, dash_meta_max))} 档位，只能通过 DASH 获取（音视频分离，需服务端合并）。"
-        )
     else:
-        out["verdict"] = (
-            f"凭据已生效（大会员），但该视频本身最高只有 {label(mp4_max)}，不是登录问题。"
-        )
+        out["verdict"] = _quality_verdict(mp4_max, dash, out["server_ffmpeg"])
     return out
 
 
 # ---------------------------------------------------------------- 主流程
 
 async def _resolve_short(client: httpx.AsyncClient, url: str) -> str:
+    # Short-link requests carry no account credentials and use pinned public IPs.
+    async with media_http.media_client(headers={"User-Agent": PC_UA}, timeout=20) as safe_client:
+        return await _resolve_short_with_client(safe_client, url)
+
+
+async def _resolve_short_with_client(client: httpx.AsyncClient, url: str) -> str:
     """b23.tv 短链 -> 真实长链。
 
     两种情况都要处理（实测都会遇到）：
@@ -1632,17 +1634,20 @@ async def _resolve_short(client: httpx.AsyncClient, url: str) -> str:
     """
     current = url
     for _ in range(6):
+        if not is_bilibili_link(current) or media_http.platform_of_url(current) != "bilibili":
+            raise ParseError("短链跳转目标不是有效的哔哩哔哩地址")
         try:
-            r = await client.get(current, follow_redirects=False)
-        except httpx.HTTPError as e:
+            r = await media_http.short_response(client, current)
+        except (httpx.HTTPError, media_http.UnsafeURL, media_http.MediaTooLarge) as e:
             raise ParseError("短链解析失败，请重新复制分享链接后再试") from e
 
         if r.status_code in (301, 302, 303, 307, 308):
             loc = r.headers.get("location") or ""
             if not loc:
                 break
-            if not loc.startswith("http"):
-                loc = "https://www.bilibili.com" + loc
+            loc = str(httpx.URL(current).join(loc))
+            if not is_bilibili_link(loc) or media_http.platform_of_url(loc) != "bilibili":
+                raise ParseError("短链跳转目标不是有效的哔哩哔哩地址")
             if (extract_bvid(loc) or extract_av_id(loc)
                     or _BANGUMI_PATH_RE.search(loc)):
                 return loc

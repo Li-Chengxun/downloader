@@ -23,6 +23,8 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Sequence
 
 import httpx
+import media_http
+import resource_limits as limits
 
 from ffmpeg_tool import cleanup_dir, ffmpeg_path  # noqa: F401  (cleanup_dir 供 main 复用)
 from parser import MOBILE_UA, ParseError
@@ -130,12 +132,15 @@ async def _download_image(client: httpx.AsyncClient, urls: List[str], dest: Path
     """把一张图下到 dest；依次尝试候选地址，全部失败返回 False。"""
     for u in urls[:_DL_RETRY]:
         try:
-            r = await client.get(u)
+            async with media_http.media_stream(client, u) as r:
+                if r.status_code == 200:
+                    size = await media_http.save_media(r, dest, limits.MAX_IMAGE_BYTES)
+                    if size:
+                        return True
+        except (media_http.UnsafeURL, media_http.MediaTooLarge) as exc:
+            raise SlideshowError(str(exc)) from exc
         except httpx.HTTPError:
             continue
-        if r.status_code == 200 and r.content:
-            dest.write_bytes(r.content)
-            return True
     return False
 
 
@@ -162,9 +167,8 @@ async def build_slideshow(images: Sequence[Dict[str, Any]],
 
     tmpdir = Path(tempfile.mkdtemp(prefix="dyslideshow_"))
     try:
-        async with httpx.AsyncClient(headers=_UA_HEADERS,
-                                     timeout=httpx.Timeout(30, read=_DL_TIMEOUT),
-                                     follow_redirects=True) as client:
+        async with media_http.media_client(headers=_UA_HEADERS,
+                                           timeout=httpx.Timeout(30, read=_DL_TIMEOUT)) as client:
             saved: List[Path] = []
             for i, im in enumerate(items):
                 dest = tmpdir / f"img_{i:03d}.{_ext_of(im)}"
@@ -196,7 +200,10 @@ async def build_slideshow(images: Sequence[Dict[str, Any]],
         except OSError as e:
             raise SlideshowError(f"无法启动 ffmpeg：{e}") from e
 
-        _, err = await proc.communicate()
+        try:
+            _, err = await limits.communicate_process(proc)
+        except asyncio.TimeoutError as exc:
+            raise SlideshowError("图片合成超时，请减少图片数量后重试") from exc
         if proc.returncode != 0 or not out.exists() or out.stat().st_size == 0:
             detail = (err or b"").decode("utf-8", "ignore").strip().splitlines()
             raise SlideshowError(
@@ -209,7 +216,7 @@ async def build_slideshow(images: Sequence[Dict[str, Any]],
             except OSError:
                 pass
         return out
-    except Exception:
+    except BaseException:
         cleanup_dir(tmpdir)
         raise
 
@@ -358,9 +365,8 @@ async def pack_zip(images: Sequence[Dict[str, Any]],
 
     tmpdir = Path(tempfile.mkdtemp(prefix="dyimgzip_"))
     try:
-        async with httpx.AsyncClient(headers=_UA_HEADERS,
-                                     timeout=httpx.Timeout(30, read=_DL_TIMEOUT),
-                                     follow_redirects=True) as client:
+        async with media_http.media_client(headers=_UA_HEADERS,
+                                           timeout=httpx.Timeout(30, read=_DL_TIMEOUT)) as client:
             saved: List[Path] = []
             for i, im in enumerate(items):
                 # 文件名补零，解压后按序号自然排序，与帖内顺序一致
@@ -384,6 +390,6 @@ async def pack_zip(images: Sequence[Dict[str, Any]],
             except OSError:
                 pass
         return out
-    except Exception:
+    except BaseException:
         cleanup_dir(tmpdir)
         raise

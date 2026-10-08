@@ -7,6 +7,10 @@ deploy/certs/
 # 部署补丁包（临时产物）
 douyin-deploy-fix.tar.gz
 douyin-downloader-update.tar.gz
+douyin-downloader-update-*.tar.gz
+douyin-downloader-update-*.tar.gz.sha256
+.update-backups/
+.update-test-*/
 
 # Python
 __pycache__/

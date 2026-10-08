@@ -118,4 +118,7 @@ echo "  停止服务 → Ctrl+C"
 echo ""
 
 cd "$BACKEND_DIR"
+if [ -f "$PROJECT_DIR/.env" ]; then
+  exec "$PY" -m uvicorn main:app --host "$HOST" --port "$PORT" --env-file "$PROJECT_DIR/.env"
+fi
 exec "$PY" -m uvicorn main:app --host "$HOST" --port "$PORT"

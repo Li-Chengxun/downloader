@@ -35,6 +35,16 @@ services:
       # ffmpeg 路径。镜像里已内置（/usr/bin/ffmpeg）并已在 PATH 中，
       # 所以留空即自动找到；仅当要覆盖成别的路径时才需要填。
       FFMPEG_BIN: "${FFMPEG_BIN:-}"
+      MAX_IMAGES: "${MAX_IMAGES:-100}"
+      MAX_IMAGE_BYTES: "${MAX_IMAGE_BYTES:-20971520}"
+      MAX_STREAM_BYTES: "${MAX_STREAM_BYTES:-4294967296}"
+      MAX_MEDIA_JOBS: "${MAX_MEDIA_JOBS:-2}"
+      MAX_DOWNLOADS: "${MAX_DOWNLOADS:-16}"
+      JOB_TIMEOUT: "${JOB_TIMEOUT:-900}"
+      FFMPEG_TIMEOUT: "${FFMPEG_TIMEOUT:-300}"
+      MAX_SESSIONS: "${MAX_SESSIONS:-4096}"
+      MAX_PREPARED_FILES: "${MAX_PREPARED_FILES:-8}"
+      PREPARED_FILE_TTL: "${PREPARED_FILE_TTL:-600}"
     ports:
       # 用 Nginx 时把 APP_BIND 设为 127.0.0.1，只允许本机反代访问，更安全
       - "${APP_BIND:-0.0.0.0}:${APP_PORT:-8000}:8000"

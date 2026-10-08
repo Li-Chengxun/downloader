@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import secrets
 import time
+from resource_limits import positive_int
 from dataclasses import dataclass, field
 from typing import Dict, List, Optional
 
@@ -29,6 +30,10 @@ DEFAULT_TTL = 30 * 24 * 3600
 
 #: 二维码扫码会话的有效期（秒），B 站二维码本身约 3 分钟失效
 QR_TTL = 180
+
+
+class SessionCapacityExceeded(Exception):
+    pass
 
 
 @dataclass
@@ -60,20 +65,26 @@ class Session:
 class SessionStore:
     """会话表。单进程内存字典——本项目是单容器单进程部署，够用。"""
 
-    def __init__(self, ttl: int = DEFAULT_TTL) -> None:
+    def __init__(self, ttl: int = DEFAULT_TTL, max_sessions: Optional[int] = None) -> None:
         self._ttl = ttl
+        self._maximum = max_sessions if max_sessions is not None else positive_int("MAX_SESSIONS", 4096)
+        if self._maximum <= 0:
+            raise ValueError("max_sessions must be positive")
         self._data: Dict[str, Session] = {}
+        self._last_purge = 0.0
 
     # ---------------------------------------------------------- 基础操作
 
     def create(self) -> Session:
         now = time.time()
+        if now - self._last_purge >= 60 or len(self._data) >= self._maximum:
+            self.purge()
+        if len(self._data) >= self._maximum:
+            # Preserve active logins instead of silently evicting other visitors.
+            raise SessionCapacityExceeded("会话容量已满")
         sid = secrets.token_urlsafe(24)
         sess = Session(sid=sid, created_at=now, last_seen=now)
         self._data[sid] = sess
-        # 顺手清理，避免长期运行后内存里堆积过期会话
-        if len(self._data) > 64:
-            self.purge()
         return sess
 
     def get(self, sid: Optional[str]) -> Optional[Session]:
@@ -119,12 +130,15 @@ class SessionStore:
         sess.bili_cookie = ""
         sess.bili_user = {}
         sess.login_at = 0.0
+        sess.qr_key = ""
+        sess.qr_at = 0.0
 
     # ---------------------------------------------------------- 维护
 
     def purge(self) -> int:
         """清理过期会话，返回清理条数。"""
         now = time.time()
+        self._last_purge = now
         dead: List[str] = [sid for sid, s in self._data.items() if now - s.last_seen > self._ttl]
         for sid in dead:
             self._data.pop(sid, None)

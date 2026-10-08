@@ -48,6 +48,19 @@ def _ffmpeg_runs(path: str) -> bool:
         return False
 
 
+def _winget_ffmpeg_paths() -> List[str]:
+    """Find installed Windows binaries when the PATH entry is a broken WinGet shim."""
+    if sys.platform != "win32":
+        return []
+    local = os.environ.get("LOCALAPPDATA")
+    roots = {Path.home() / "AppData" / "Local"}
+    if local:
+        roots.add(Path(local))
+    return [str(binary) for root in sorted(roots)
+            for package in sorted((root / "Microsoft" / "WinGet" / "Packages").glob("*FFmpeg*"))
+            for binary in sorted(package.glob("*/bin/ffmpeg.exe"))]
+
+
 def ffmpeg_path() -> Optional[str]:
     """返回**确认可执行**的 ffmpeg 路径；没有则返回 ``None``。
 
@@ -71,6 +84,14 @@ def ffmpeg_path() -> Optional[str]:
         candidates.append(found)
 
     path = next((c for c in candidates if Path(c).exists() and _ffmpeg_runs(c)), None)
+    if path is None:
+        for candidate in _winget_ffmpeg_paths():
+            if candidate in candidates:
+                continue
+            candidates.append(candidate)
+            if Path(candidate).exists() and _ffmpeg_runs(candidate):
+                path = candidate
+                break
     _ffmpeg_cache = (path, now)
     if path is None and candidates:
         # 找到了名字却跑不起来，这是最容易让人困惑的情形，值得留下日志线索

@@ -28,6 +28,7 @@ from typing import Any, Dict, List, Optional
 from urllib.parse import urlparse
 
 import httpx
+import media_http
 
 MOBILE_UA = (
     "Mozilla/5.0 (iPhone; CPU iPhone OS 17_2 like Mac OS X) "
@@ -225,27 +226,29 @@ async def resolve_canonical_url(url: str, client: Optional[httpx.AsyncClient] = 
 
     own = client is None
     if own:
-        client = httpx.AsyncClient(
+        client = media_http.media_client(
             headers={"User-Agent": MOBILE_UA, "Accept-Language": "zh-CN,zh;q=0.9"},
             timeout=15,
-            follow_redirects=False,
         )
     try:
         current = url
         for _ in range(6):
-            r = await client.get(current, follow_redirects=False)
+            if not is_douyin_link(current) or media_http.platform_of_url(current) != "douyin":
+                raise ParseError("短链跳转目标不是有效的抖音地址")
+            r = await media_http.short_response(client, current)
             loc = r.headers.get("location") or ""
             if not loc:
                 break
-            if not loc.startswith("http"):
-                loc = "https://www.douyin.com" + loc
+            loc = str(httpx.URL(current).join(loc))
+            if not is_douyin_link(loc) or media_http.platform_of_url(loc) != "douyin":
+                raise ParseError("短链跳转目标不是有效的抖音地址")
             vid = extract_video_id(loc)
             if vid:
                 return f"https://www.douyin.com/video/{vid}"
             current = loc
         vid = extract_video_id(current)
         return f"https://www.douyin.com/video/{vid}" if vid else current
-    except httpx.HTTPError as e:
+    except (httpx.HTTPError, media_http.UnsafeURL, media_http.MediaTooLarge) as e:
         raise ParseError("链接已失效或网络异常，请重新复制分享链接后再试") from e
     finally:
         if own:
@@ -547,22 +550,29 @@ def _largest(covers: List[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
 
 async def _resolve_short_url(client: httpx.AsyncClient, url: str) -> str:
     """短链 301 重定向 -> 真实 URL。"""
-    r = await client.get(url, follow_redirects=False)
+    r = await media_http.short_response(client, url)
     if r.status_code in (301, 302, 303, 307, 308):
         loc = r.headers.get("location", "")
         if loc:
-            return loc if loc.startswith("http") else f"https://www.douyin.com{loc}"
+            target = str(httpx.URL(url).join(loc))
+            if not is_douyin_link(target) or media_http.platform_of_url(target) != "douyin":
+                raise ParseError("短链跳转目标不是有效的抖音地址")
+            return target
     return url
 
 
 async def _fetch_share_html(client: httpx.AsyncClient, vid: str, tpl: str) -> Optional[str]:
     """请求单个分享页模板，返回含 ``_ROUTER_DATA`` 的 HTML（不判断内容是否完整）。"""
     try:
-        r = await client.get(tpl.format(vid=vid), follow_redirects=True)
-    except httpx.HTTPError:
+        async with media_http.media_stream(client, tpl.format(vid=vid)) as r:
+            body = bytearray()
+            async for chunk in media_http.limited_chunks(r, 2 * 1024 * 1024):
+                body.extend(chunk)
+            text = bytes(body).decode("utf-8", "replace")
+            if r.status_code == 200 and "_ROUTER_DATA" in text:
+                return text
+    except (httpx.HTTPError, media_http.UnsafeURL, media_http.MediaTooLarge):
         return None
-    if r.status_code == 200 and "_ROUTER_DATA" in r.text:
-        return r.text
     return None
 
 
@@ -765,7 +775,7 @@ async def parse_via_share_page(url: str) -> Dict[str, Any]:
         "Accept-Language": "zh-CN,zh;q=0.9",
         "Referer": "https://www.douyin.com/",
     }
-    async with httpx.AsyncClient(headers=headers, timeout=15, follow_redirects=False) as client:
+    async with media_http.media_client(headers=headers, timeout=15) as client:
         if "v.douyin.com" in url or "iesdouyin.com/share" in url:
             url = await _resolve_short_url(client, url)
         vid = extract_video_id(url)

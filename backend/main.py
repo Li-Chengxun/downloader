@@ -29,45 +29,32 @@ B 站未登录时只能下到 720P，登录后可解锁 1080P 及以上。凭据
 
 from __future__ import annotations
 
-import os
+import asyncio
+import logging
 from contextlib import asynccontextmanager
+from functools import wraps
 from pathlib import Path
-from typing import List, Optional
+from typing import Annotated, List, Optional
 from urllib.parse import quote
 
 import httpx
 from fastapi import FastAPI, HTTPException, Query, Request
-from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse, Response, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
-# FastAPI 只导出 ``BackgroundTasks``（复数），单个任务类要从 starlette 取
-from starlette.background import BackgroundTask
 
 import bilibili as bili
 import ffmpeg_tool
 import parser as douyin
 import sessions as session_store
 import slideshow
+import media_http
+import resource_limits as limits
+from prepared_files import PreparedFiles, PreparedCapacityExceeded
 
 BASE_DIR = Path(__file__).resolve().parent
+logger = logging.getLogger(__name__)
 
-
-def _extra_hosts(env_name: str) -> tuple:
-    """读取额外的放通域名（逗号分隔）。CDN 域名变动时可临时补充，一般无需配置。"""
-    raw = os.environ.get(env_name, "")
-    return tuple(h.strip().lower() for h in raw.split(",") if h.strip())
-
-
-# 各平台 CDN 域名关键字（防开放代理滥用）
-_PLATFORM_HOSTS = {
-    "douyin": (
-        "douyin", "bytedance", "bytecdn", "zjcdn", "douyinvod", "toutiao", "pstatp",
-    ) + _extra_hosts("EXTRA_DOUYIN_HOSTS"),
-    "bilibili": (
-        "bilivideo", "bilibili", "hdslb", "akamaized.net", "mcdn", "upos",
-    ) + _extra_hosts("EXTRA_BILIBILI_HOSTS"),
-}
 
 # 直链请求头：两个平台的防盗链要求不同，必须分开
 _DL_HEADERS = {
@@ -79,16 +66,17 @@ _PARSE_ERRORS = (douyin.ParseError, bili.ParseError)
 
 #: 服务端会话表（内存）：把扫码登录的凭据按访客隔离，见 sessions.py
 sessions = session_store.SessionStore()
+prepared = PreparedFiles()
 
 
 class ImageItem(BaseModel):
     """图文帖里的单张图片，字段与 ``/api/parse`` 返回的 ``images[]`` 对齐。"""
 
-    url: str = ""
-    urls: List[str] = Field(default_factory=list)
-    width: int = 0
-    height: int = 0
-    ext: str = ""
+    url: str = Field("", max_length=8192)
+    urls: List[Annotated[str, Field(max_length=8192)]] = Field(default_factory=list, max_length=8)
+    width: int = Field(0, ge=0, le=32768)
+    height: int = Field(0, ge=0, le=32768)
+    ext: str = Field("", max_length=8)
 
 
 class PackRequest(BaseModel):
@@ -99,17 +87,18 @@ class PackRequest(BaseModel):
     反代（Nginx 默认请求行上限约 8KB）会直接回 414 Request-URI Too Large。
     """
 
-    images: List[ImageItem]
-    filename: str = ""
-    per_image_sec: float = slideshow.DEFAULT_PER_IMAGE_SEC
+    images: List[ImageItem] = Field(min_length=1, max_length=limits.MAX_IMAGES)
+    filename: str = Field("", max_length=255)
+    per_image_sec: float = Field(slideshow.DEFAULT_PER_IMAGE_SEC, ge=0.5, le=15,
+                                allow_inf_nan=False)
 
     # 以下字段只在「打包 zip」时用于生成里面的文案 Word（合成视频用不上）
-    title: str = ""
-    author: str = ""
-    desc: str = ""
-    stats_text: str = ""
-    video_id: str = ""
-    platform: str = "douyin"
+    title: str = Field("", max_length=1000)
+    author: str = Field("", max_length=255)
+    desc: str = Field("", max_length=100000)
+    stats_text: str = Field("", max_length=1000)
+    video_id: str = Field("", max_length=100)
+    platform: str = Field("douyin", pattern="^(douyin|bilibili)$")
 
 
 #: 各平台的作品页地址模板，用于在文案里回填「来源」
@@ -162,21 +151,25 @@ def _check_image_hosts(images: List[ImageItem]) -> None:
 async def lifespan(_: FastAPI):
     await douyin.startup()      # 初始化抖音解析引擎（Evil0ctal API）客户端
     await bili.startup()        # 初始化哔哩哔哩接口客户端
-    yield
-    await douyin.shutdown()
-    await bili.shutdown()
+    async def purge_files():
+        while True:
+            await asyncio.sleep(30)
+            prepared.purge()
+    purge_task = asyncio.create_task(purge_files())
+    try:
+        yield
+    finally:
+        purge_task.cancel()
+        try:
+            await purge_task
+        except asyncio.CancelledError:
+            pass
+        prepared.close()
+        await douyin.shutdown()
+        await bili.shutdown()
 
 
 app = FastAPI(title="抖音 / 哔哩哔哩 视频下载站", version="1.3.0", lifespan=lifespan)
-
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],
-    allow_methods=["*"],
-    allow_headers=["*"],
-    allow_credentials=True,
-)
-
 
 @app.middleware("http")
 async def attach_session(request: Request, call_next):
@@ -185,11 +178,19 @@ async def attach_session(request: Request, call_next):
     会话 id 放在 HttpOnly Cookie 里，前端 JS 读不到，降低被窃取的风险。
     仅在新会话创建时下发 Cookie，已有会话不重复设置。
     """
+    # 首页、静态资源和媒体下载均不需要账号会话。
+    if (request.url.path not in ("/api/parse", "/api/dash", "/api/images/zip", "/api/slideshow")
+            and not request.url.path.startswith(("/api/bili/", "/api/files/"))):
+        return await call_next(request)
     sid = request.cookies.get(session_store.SESSION_COOKIE)
     sess = sessions.get(sid)
     fresh = sess is None
     if sess is None:
-        sess = sessions.create()
+        try:
+            sess = sessions.create()
+        except session_store.SessionCapacityExceeded:
+            return JSONResponse(status_code=503, headers={"Retry-After": "60"},
+                                content={"ok": False, "message": "访客会话已满，请稍后重试"})
     request.state.session = sess
 
     response = await call_next(request)
@@ -199,6 +200,7 @@ async def attach_session(request: Request, call_next):
             sess.sid,
             max_age=session_store.DEFAULT_TTL,
             httponly=True,
+            secure=request.url.scheme == "https",
             samesite="lax",
             path="/",
         )
@@ -206,15 +208,98 @@ async def attach_session(request: Request, call_next):
 
 
 def _platform_of_host(url: str) -> Optional[str]:
-    """按域名判断直链属于哪个平台；都不匹配返回 None。"""
+    return media_http.platform_of_url(url)
+
+
+class JobFileResponse(FileResponse):
+    """Clean generated files even when sending the response is cancelled."""
+    release_job = None
+
+    async def __call__(self, scope, receive, send):
+        try:
+            await super().__call__(scope, receive, send)
+        finally:
+            bili.cleanup_dir(Path(self.path).parent)
+            if self.release_job is not None:
+                await self.release_job(None, None, None)
+                self.release_job = None
+
+
+class ClosingStreamingResponse(StreamingResponse):
+    def __init__(self, *args, close, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.close = close
+
+    async def __call__(self, scope, receive, send):
+        try:
+            await super().__call__(scope, receive, send)
+        finally:
+            await self.close()
+
+
+def _limited_job(func):
+    @wraps(func)
+    async def wrapped(*args, **kwargs):
+        slot = limits.jobs.slot()
+        try:
+            await slot.__aenter__()
+        except limits.CapacityExceeded as exc:
+            return JSONResponse(status_code=429, headers={"Retry-After": "5"},
+                                content={"ok": False, "message": str(exc)})
+        transfer_slot = False
+        try:
+            response = await asyncio.wait_for(func(*args, **kwargs), limits.JOB_TIMEOUT)
+            if isinstance(response, JobFileResponse):
+                response.release_job = slot.__aexit__
+                transfer_slot = True
+            return response
+        except PreparedCapacityExceeded as exc:
+            return JSONResponse(status_code=429, headers={"Retry-After": "30"},
+                                content={"ok": False, "message": str(exc)})
+        except media_http.MediaTooLarge as exc:
+            return JSONResponse(status_code=413, content={"ok": False, "message": str(exc)})
+        except asyncio.TimeoutError:
+            return JSONResponse(status_code=504, content={"ok": False, "message": "媒体处理超时，请稍后重试"})
+        finally:
+            if not transfer_slot:
+                await slot.__aexit__(None, None, None)
+    return wrapped
+
+
+class PreparedFileResponse(FileResponse):
+    def __init__(self, token, item):
+        super().__init__(item.path, media_type=item.media_type,
+                         headers={"Content-Disposition": f"attachment; filename*=UTF-8''{quote(item.filename, safe='')}"})
+        self.token = token
+
+    async def __call__(self, scope, receive, send):
+        try:
+            await super().__call__(scope, receive, send)
+        finally:
+            # Retain until expiry so browser retries and Range requests work.
+            prepared.release(self.token)
+
+
+def _generated_response(request, path, filename, media_type, prepare):
     try:
-        netloc = httpx.URL(url).host.lower()
-    except Exception:
-        return None
-    for name, keys in _PLATFORM_HOSTS.items():
-        if any(k in netloc for k in keys):
-            return name
-    return None
+        if path.stat().st_size > limits.MAX_STREAM_BYTES:
+            raise media_http.MediaTooLarge("生成文件超过服务器大小限制")
+        if prepare:
+            token = prepared.add(path, request.state.session.sid, filename, media_type)
+            return {"ok": True, "download_url": f"/api/files/{token}", "expires_in": prepared.ttl}
+        return JobFileResponse(path, media_type=media_type,
+                               headers={"Content-Disposition": f"attachment; filename*=UTF-8''{quote(filename, safe='')}"})
+    except BaseException:
+        bili.cleanup_dir(path.parent)
+        raise
+
+
+@app.get("/api/files/{token}")
+async def api_prepared_file(request: Request, token: str):
+    item = prepared.claim(token, request.state.session.sid)
+    if item is None:
+        raise HTTPException(status_code=404, detail="文件已过期、已下载或不属于当前会话，请重新生成")
+    return PreparedFileResponse(token, item)
 
 
 def _detect_platform(text: str) -> str:
@@ -251,7 +336,7 @@ def _detect_platform(text: str) -> str:
 @app.get("/api/parse")
 async def api_parse(
     request: Request,
-    url: str = Query(..., description="抖音 / 哔哩哔哩 分享链接或整段分享文字"),
+    url: str = Query(..., max_length=16384, description="抖音 / 哔哩哔哩 分享链接或整段分享文字"),
     p: Optional[int] = Query(None, description="哔哩哔哩分P序号（从 1 开始），可选"),
     ep: Optional[int] = Query(None, description="哔哩哔哩番剧单集 ep_id，可选"),
 ):
@@ -280,6 +365,7 @@ async def api_parse(
             content={"ok": False, "message": "无法连接视频平台服务器，请检查网络后重试"},
         )
     except Exception:
+        logger.exception("解析接口异常")
         return JSONResponse(
             status_code=500,
             content={"ok": False, "message": "解析出现未知错误，请稍后重试"},
@@ -350,6 +436,10 @@ async def api_bili_qr_poll(request: Request,
         return JSONResponse(status_code=502, content={"ok": False, "message": "查询扫码状态失败"})
 
     status = result.get("status")
+    # A QR refresh or logout may have happened while the upstream request awaited.
+    if not sessions.qr_is_current(sess, key):
+        return JSONResponse(status_code=409, content={"ok": False, "status": "stale",
+                            "message": "二维码已过期或已被刷新，请重试"})
     payload = {"ok": True, "status": status, "message": result.get("message", "")}
 
     if status == "success":
@@ -396,18 +486,21 @@ async def api_bili_debug(request: Request,
     except httpx.HTTPError:
         return JSONResponse(status_code=502, content={"ok": False, "message": "无法连接哔哩哔哩服务器"})
     except Exception:
+        logger.exception("画质诊断异常")
         return JSONResponse(status_code=500, content={"ok": False, "message": "诊断出现未知错误"})
 
 
 @app.get("/api/dash")
+@_limited_job
 async def api_dash(
     request: Request,
     bvid: str = Query("", description="视频 BV 号（普通投稿用）"),
     cid: int = Query(..., description="分P 的 cid"),
     qn: int = Query(0, description="目标清晰度，0 表示最高档"),
     codecid: int = Query(0, description="目标编码，0 表示自动（优先 H.264）"),
-    filename: str = Query("video.mp4", description="保存文件名"),
+    filename: str = Query("video.mp4", max_length=255, description="保存文件名"),
     ep_id: int = Query(0, description="番剧单集 ep_id（番剧用，传了它则忽略 bvid）"),
+    prepare: bool = Query(False, description="生成后返回浏览器原生下载地址"),
 ):
     """下载 DASH 高清档位：服务端合并音视频后返回完整 MP4。
 
@@ -434,23 +527,20 @@ async def api_dash(
     except httpx.HTTPError:
         return JSONResponse(status_code=502, content={"ok": False, "message": "无法连接哔哩哔哩服务器"})
     except Exception:
+        logger.exception("DASH 合并异常")
         return JSONResponse(status_code=500, content={"ok": False, "message": "音视频合并失败，请稍后重试"})
 
     # 合并产物可能上百 MB，响应发完必须删掉，否则磁盘很快被吃满
-    return FileResponse(
-        path,
-        media_type="video/mp4",
-        headers={"Content-Disposition": f"attachment; filename*=UTF-8''{quote(filename)}"},
-        background=BackgroundTask(bili.cleanup_dir, path.parent),
-    )
+    return _generated_response(request, path, filename, "video/mp4", prepare)
 
 
 # ---------------------------------------------------------------- 下载接口
 
 @app.get("/api/download")
 async def api_download(
-    url: str = Query(..., description="视频直链（来自解析结果）"),
-    filename: str = Query("video.mp4", description="保存文件名"),
+    request: Request,
+    url: str = Query(..., max_length=8192, description="视频直链（来自解析结果）"),
+    filename: str = Query("video.mp4", max_length=255, description="保存文件名"),
 ):
     """代理流式下载（绕过 Referer 防盗链 + 触发浏览器保存）。
 
@@ -471,54 +561,71 @@ async def api_download(
             detail=(
                 f"直链域名 {host or '（无法解析）'} 不在下载白名单内。"
                 "若平台更换了 CDN 域名，请在 .env 的 EXTRA_BILIBILI_HOSTS / "
-                "EXTRA_DOUYIN_HOSTS 里追加域名关键字。B 站第三方 PCDN 节点地址"
+                "EXTRA_DOUYIN_HOSTS 里追加完整域名。B 站第三方 PCDN 节点地址"
                 "默认不放通（防止本接口被当成开放代理滥用），请重新解析获取官方 CDN 直链。"
             ),
         )
 
-    client = httpx.AsyncClient(
-        headers=_DL_HEADERS[platform],
-        timeout=httpx.Timeout(30, read=120),
-        follow_redirects=True,
-    )
+    slot = limits.downloads.slot()
     try:
-        r = await client.send(client.build_request("GET", url), stream=True)
-    except httpx.HTTPError:
-        await client.aclose()
-        raise HTTPException(status_code=502, detail="视频直链连接失败，直链可能已过期，请重新解析")
+        await slot.__aenter__()
+    except limits.CapacityExceeded as exc:
+        raise HTTPException(status_code=429, detail=str(exc), headers={"Retry-After": "5"})
+    client = None
+    r = None
+    closed = False
 
-    if r.status_code != 200:
-        await r.aclose()
-        await client.aclose()
-        raise HTTPException(status_code=502, detail=f"视频直链返回 {r.status_code}，直链可能已过期，请重新解析")
-
-    async def gen():
+    async def close():
+        nonlocal closed
+        if closed:
+            return
+        closed = True
         try:
-            async for chunk in r.aiter_bytes(1 << 16):
-                yield chunk
+            if r is not None:
+                await r.aclose()
         finally:
-            await r.aclose()
-            await client.aclose()
+            try:
+                if client is not None:
+                    await client.aclose()
+            finally:
+                await slot.__aexit__(None, None, None)
 
-    headers = {"Content-Disposition": f"attachment; filename*=UTF-8''{quote(filename)}"}
-    content_length = r.headers.get("content-length")
-    if content_length:
-        headers["Content-Length"] = content_length
-
-    return StreamingResponse(gen(), media_type=r.headers.get("content-type", "video/mp4"), headers=headers)
+    transfer = False
+    try:
+        client = media_http.media_client(headers={**_DL_HEADERS[platform], "Accept-Encoding": "identity"},
+                                        timeout=httpx.Timeout(30, read=120))
+        forwarded = {key: request.headers[key] for key in ("range", "if-range") if key in request.headers}
+        r = await media_http.open_media(client, url, headers=forwarded)
+        if r.status_code not in (200, 206, 416):
+            raise HTTPException(status_code=502, detail=f"视频直链返回 {r.status_code}，请重新解析")
+        media_http.check_length(r, limits.MAX_STREAM_BYTES)
+        headers = {"Content-Disposition": f"attachment; filename*=UTF-8''{quote(filename, safe='')}",
+                   "X-Content-Type-Options": "nosniff"}
+        for name in ("Content-Length", "Content-Range", "Accept-Ranges", "ETag", "Last-Modified", "Content-Encoding"):
+            if name in r.headers:
+                headers[name] = r.headers[name]
+        response = ClosingStreamingResponse(
+            media_http.limited_chunks(r, limits.MAX_STREAM_BYTES, raw=True), close=close,
+            status_code=r.status_code, media_type=r.headers.get("content-type", "video/mp4"), headers=headers,
+        )
+        transfer = True
+        return response
+    except media_http.UnsafeURL as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except media_http.MediaTooLarge as exc:
+        raise HTTPException(status_code=413, detail=str(exc)) from exc
+    except httpx.HTTPError as exc:
+        raise HTTPException(status_code=502, detail="视频直链连接失败，请重新解析") from exc
+    finally:
+        if not transfer:
+            await close()
 
 
 # ---------------------------------------------------------------- 图文帖下载
 
-def _attachment(name: str, default_ext: str) -> str:
-    """补上扩展名并生成 Content-Disposition 头值。"""
-    if not name.lower().endswith(default_ext):
-        name += default_ext
-    return f"attachment; filename*=UTF-8''{quote(name)}"
-
-
 @app.post("/api/images/zip")
-async def api_images_zip(req: PackRequest):
+@_limited_job
+async def api_images_zip(request: Request, req: PackRequest, prepare: bool = Query(False)):
     """把图文帖的图片打包成一个 zip 下载。
 
     zip 里除了图片，还会放一份**文案 Word**（``文案.docx``）——
@@ -537,18 +644,18 @@ async def api_images_zip(req: PackRequest):
     except douyin.ParseError as e:
         return JSONResponse(status_code=422, content={"ok": False, "message": str(e)})
     except Exception:
+        logger.exception("图片打包异常")
         return JSONResponse(status_code=500, content={"ok": False, "message": "图片打包失败，请稍后重试"})
 
-    return FileResponse(
-        path,
-        media_type="application/zip",
-        headers={"Content-Disposition": _attachment(req.filename or "images", ".zip")},
-        background=BackgroundTask(bili.cleanup_dir, path.parent),
-    )
+    filename = req.filename or "images"
+    if not filename.lower().endswith(".zip"):
+        filename += ".zip"
+    return _generated_response(request, path, filename, "application/zip", prepare)
 
 
 @app.post("/api/slideshow")
-async def api_slideshow(req: PackRequest):
+@_limited_job
+async def api_slideshow(request: Request, req: PackRequest, prepare: bool = Query(False)):
     """把图文帖的图片合成为一个幻灯片视频（MP4）。
 
     为什么放在服务端合成：图文动辄几十张、宽高比还可能混排，用浏览器侧的
@@ -572,29 +679,42 @@ async def api_slideshow(req: PackRequest):
     except douyin.ParseError as e:
         return JSONResponse(status_code=422, content={"ok": False, "message": str(e)})
     except Exception:
+        logger.exception("幻灯片合成异常")
         return JSONResponse(status_code=500, content={"ok": False, "message": "图片合成视频失败，请稍后重试"})
 
-    return FileResponse(
-        path,
-        media_type="video/mp4",
-        headers={"Content-Disposition": _attachment(req.filename or "slideshow", ".mp4")},
-        background=BackgroundTask(bili.cleanup_dir, path.parent),
-    )
+    filename = req.filename or "slideshow"
+    if not filename.lower().endswith(".mp4"):
+        filename += ".mp4"
+    return _generated_response(request, path, filename, "video/mp4", prepare)
 
 
 @app.get("/api/cover")
-async def api_cover(url: str = Query(..., description="封面图直链")):
+async def api_cover(url: str = Query(..., max_length=8192, description="封面图直链")):
     platform = _platform_of_host(url)
     if platform is None:
         raise HTTPException(status_code=400, detail="仅支持抖音 / 哔哩哔哩 图片直链")
     try:
-        async with httpx.AsyncClient(headers=_DL_HEADERS[platform], timeout=15) as client:
-            r = await client.get(url)
+        async with limits.downloads.slot():
+            async with media_http.media_client(headers=_DL_HEADERS[platform], timeout=15) as client:
+                async with media_http.media_stream(client, url) as r:
+                    if r.status_code != 200:
+                        raise HTTPException(status_code=502, detail="封面拉取失败")
+                    content = bytearray()
+                    async for chunk in media_http.limited_chunks(r, limits.MAX_IMAGE_BYTES):
+                        content.extend(chunk)
+                    kind = r.headers.get("content-type", "image/jpeg").split(";", 1)[0].lower()
+                    if kind not in ("image/jpeg", "image/png", "image/webp", "image/gif", "image/avif"):
+                        raise HTTPException(status_code=502, detail="封面格式不受支持")
+                    return Response(content=bytes(content), media_type=kind,
+                                    headers={"X-Content-Type-Options": "nosniff"})
+    except limits.CapacityExceeded as exc:
+        raise HTTPException(status_code=429, detail=str(exc), headers={"Retry-After": "5"}) from exc
+    except media_http.UnsafeURL as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except media_http.MediaTooLarge as exc:
+        raise HTTPException(status_code=413, detail=str(exc)) from exc
     except httpx.HTTPError:
         raise HTTPException(status_code=502, detail="封面拉取失败")
-    if r.status_code != 200:
-        raise HTTPException(status_code=502, detail="封面拉取失败")
-    return Response(content=r.content, media_type=r.headers.get("content-type", "image/jpeg"))
 
 
 # ---------------------------------------------------------------- 前端静态托管
